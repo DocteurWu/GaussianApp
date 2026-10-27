@@ -1,0 +1,13 @@
+# Tout ce que l'app telecharge ou calcule : jamais sur GitHub
+saga/
+workspace/
+output_ply/
+.gaussian_app/
+gaussian_app.log
+input_video/*
+!input_video/.gitkeep
+*.ply
+*.pth
+*.mp4
+*.insv
+*.zip
