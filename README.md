@@ -269,29 +269,8 @@ GaussianApp/
 
 ---
 
-## 13. Pourquoi SAGA ne marchait pas avant, et ce qui a été corrigé
 
-| Problème | Cause | Correction dans l'app |
-|---|---|---|
-| **« La fenêtre s'ouvre mais rien ne marche »** | On donnait à SAGA un PLY Nerfstudio, sans features SAGA et dans un autre repère. `ScoreThres` valait 0, ce qui sélectionnait tout | Le 3DGS est entraîné avec le code de SAGA, les features sont toujours calculées avant d'ouvrir la fenêtre, et `ScoreThres` vaut 0,75 par défaut |
-| **`cfg_args` absent** (modèles LichtFeld, etc.) | SAGA ne lit que ses propres modèles | L'app génère `cfg_args` et range le PLY au bon format (§7) |
-| **« Manque de RAM / CUDA out of memory »** | Le faux `pytorch3d` utilisé calculait les distances entre **toutes** les paires de gaussiennes : 3 659 Go demandés pour 1 million de gaussiennes | Recherche de voisins par arbre KD : 5 secondes, quelques centaines de Mo |
-| **Mémoire GPU saturée** | SAGA chargeait les masques SAM de toutes les images dans la carte graphique | Masques gardés en RAM, envoyés au GPU une image à la fois |
-| **Images trop lourdes** | Trop d'images en pleine résolution | Nombre et résolution limités, réglables (§10) |
-| **Caméras refusées** | 3DGS exige des caméras sans distorsion (PINHOLE) | Correction automatique (COLMAP `image_undistorter`) |
-| `ModuleNotFoundError: pkg_resources` | setuptools trop récent | `setuptools<70` |
-| Plantage de PyTorch au chargement | NumPy 2 incompatible avec PyTorch 2.1 | `numpy<2` |
-| `Permission denied (publickey)` | Sous-modules git déclarés en SSH | Téléchargement forcé en HTTPS |
-| Fenêtre SAGA qui ne s'ouvre pas | dearpygui 2 au lieu de 1 | `dearpygui<2` |
-| `apt` / sudo refusés | Pas de droits admin sur le PC | Tout passe par conda dans `$HOME` |
-| Objet = toute la scène | Trop de clics en multi-clic, ou `save as` sans `segment3d` | % affiché, sauvegarde refusée si vide ou >95 %, aide « 1 à 3 clics » |
-| Morceaux parasites dans un objet | SAGA attrape des gaussiennes isolées ailleurs | Seul le bloc principal de chaque objet est gardé |
-
-Toutes ces corrections sont appliquées **automatiquement** à SAGA, à chaque lancement et sans risque si elles sont déjà faites.
-
----
-
-## 14. Dépannage
+## 13. Dépannage
 
 | Symptôme | Solution |
 |---|---|
@@ -302,4 +281,4 @@ Toutes ces corrections sont appliquées **automatiquement** à SAGA, à chaque l
 | Manque de RAM pendant SAGA | baisser `GS_MAX_FRAMES` / `GS_MAX_IMAGE_SIZE` (ou `GS_360_MAX_IMAGES`), puis **↺ Refaire depuis…** |
 | COLMAP ne trouve pas assez de caméras | filmer plus lentement, augmenter `GS_FPS`, éviter les surfaces unies et les reflets |
 | Installation cassée | supprimer `.gaussian_app/saga_ok`, puis **⬇ Tout installer** |
-| Autre | envoyer `gaussian_app.log` |
+| Autre | envoyer `gaussian_app.log` à Claude |
