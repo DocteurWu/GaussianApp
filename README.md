@@ -201,16 +201,33 @@ Activez la case **Masquer la personne qui filme** si vous apparaissez dans les i
 
 Carte **⚙️ Réglages** de l'interface, avec trois préréglages : **⚡ Essai rapide**, **Normal** et **💎 Qualité**. Les valeurs sont enregistrées dans `.gaussian_app/settings.env`.
 
+### Adaptation automatique au PC
+
+Par défaut, les tailles d'images sont sur **auto**. À chaque étape, l'app lit :
+- la mémoire de la carte graphique (`nvidia-smi`) ;
+- la RAM libre ;
+- le nombre et la taille des images du projet.
+
+Puis elle choisit elle-même :
+
+| Étape | Ce qui est adapté | Exemple : RTX 2080 (8 Go), 16 Go de RAM libre, 581 images 1920×1080 |
+|---|---|---|
+| COLMAP + entraînement 3DGS | résolution des images (toutes doivent tenir dans ~50 % de la RAM libre) | 1408 px |
+| SAM | réduction des images selon la mémoire de la carte | ×4 |
+| get_scale + features SAGA | largeur des images (~35 % de la RAM libre) | 1216 px |
+
+**Si une étape déborde quand même** (carte graphique ou RAM), l'app la relance toute seule avec des images 25 % plus petites, jusqu'à 512 px. Pour SAM, la réduction passe à ×4 puis ×8. La console affiche le matériel détecté et la taille choisie. Choisir une valeur fixe dans les réglages désactive « auto » pour ce réglage.
+
 | Réglage | Défaut | Effet |
 |---|---|---|
 | `GS_FPS` | 2 | images extraites par seconde de vidéo (1 à 3 conseillé) |
 | `GS_MAX_FRAMES` | 250 | nombre max d'images, réparties sur toute la vidéo |
-| `GS_MAX_IMAGE_SIZE` | 1600 | résolution max (COLMAP + entraînement) |
+| `GS_MAX_IMAGE_SIZE` | auto | résolution max (COLMAP + entraînement) : 1024 à 2400 selon la carte |
 | `GS_ITERS` | 30000 | itérations 3DGS (7000 = essai rapide) |
 | `GS_SH_DEGREE` | 1 | reflets : 1 = léger (Quest 3), 3 = complets |
-| `GS_SAM_DOWNSAMPLE` | 2 | réduction des images pour SAM. Si la mémoire GPU manque, l'app réessaie seule à 4 puis 8 |
+| `GS_SAM_DOWNSAMPLE` | auto | réduction des images pour SAM (1, 2, 4 ou 8) selon la carte ; réessaie seule plus fort si besoin |
 | `GS_SAGA_ITERS` | 10000 | itérations des features SAGA |
-| `GS_SAGA_RES` | 1024 | largeur max des images chargées par SAGA (get_scale, features). 800 si le PC manque de RAM |
+| `GS_SAGA_RES` | auto | largeur des images chargées par SAGA (get_scale, features), selon la RAM libre |
 | `GS_SYNTH_VIEWS` | 300 | vues virtuelles pour un PLY seul |
 | `GS_360` | auto | `auto`, `1` (forcer) ou `0` (désactiver) |
 | `GS_360_MAX_IMAGES` / `GS_360_SIZE` / `GS_360_FOV` | 480 / 1280 / 100 | vues 360° : nombre, taille, champ |
@@ -277,8 +294,8 @@ GaussianApp/
 | `Aucun GPU NVIDIA détecté` | Vérifier `nvidia-smi`. Le pilote doit être installé par un admin |
 | Le navigateur ne s'ouvre pas | Ouvrir **http://localhost:7860** à la main, ou `GS_UI_PORT=7861 bash gaussian_app.sh` si le port est pris |
 | Pas d'écran (connexion SSH) | `bash gaussian_app.sh menu`, ou `ssh -L 7860:localhost:7860 …` puis ouvrir le navigateur sur son propre PC. La découpe SAGA a besoin d'un écran |
-| CUDA out of memory pendant SAM | l'app réessaie seule (×4, puis ×8). Sinon : Réglages > SAGA > Réduction des images pour SAM |
-| « RAM du PC saturée » / code 137 | Réglages > SAGA > Largeur des images pour SAGA = 800, puis relancer. Pour suivre la RAM en direct : `free -h` ou `htop` dans un autre terminal |
+| « mémoire de la carte graphique insuffisante » | l'app réessaie seule en plus petit. Si ça échoue même à 512 px : importer moins d'images |
+| « RAM du PC saturée » / code 137 | idem : nouvel essai automatique en plus petit. Fermer les autres logiciels (LichtFeld, navigateur…) aide. Pour suivre la RAM : `free -h` ou `htop` dans un autre terminal |
 | Voir l'erreur complète d'une étape SAGA | `.gaussian_app/last_saga_run.txt` (dernier programme SAGA lancé) ou `gaussian_app.log` |
 | COLMAP ne trouve pas assez de caméras | filmer plus lentement, augmenter `GS_FPS`, éviter les surfaces unies et les reflets |
 | Installation cassée | supprimer `.gaussian_app/saga_ok`, puis **⬇ Tout installer** |

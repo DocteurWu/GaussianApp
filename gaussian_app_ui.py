@@ -44,16 +44,16 @@ SETTINGS = [
      "help": "100° = bon recouvrement entre vues voisines (équirectangulaire)."},
     {"key": "GS_360_POLES", "group": "Vidéo 360°", "label": "Ajouter une vue vers le haut et une vers le bas", "type": "bool", "default": 0,
      "help": "Plafond et sol vus de face. Inutile si vous faites des tours à plusieurs hauteurs."},
-    {"key": "GS_MAX_IMAGE_SIZE", "group": "Reconstruction", "label": "Résolution maximale (pixels)", "type": "int", "min": 640, "max": 4000, "default": 1600,
-     "help": "Pour COLMAP et l'entraînement. 1600 tient sur une carte 8 Go (RTX 2080)."},
+    {"key": "GS_MAX_IMAGE_SIZE", "group": "Reconstruction", "label": "Résolution maximale (pixels)", "type": "choice", "choices": ["auto", 1024, 1280, 1600, 2000, 2400, 3200], "default": "auto",
+     "help": "Pour COLMAP et l'entraînement. auto = selon la carte graphique et la RAM (1600 sur une RTX 2080) ; réduit tout seul si la mémoire déborde."},
     {"key": "GS_ITERS", "group": "Reconstruction", "label": "Itérations d'entraînement 3DGS", "type": "int", "min": 1000, "max": 60000, "default": 30000,
      "help": "7000 = essai rapide (~5 min), 30000 = qualité (~30-40 min sur RTX 2080)."},
     {"key": "GS_SH_DEGREE", "group": "Reconstruction", "label": "Reflets (degré SH)", "type": "choice", "choices": [0, 1, 2, 3], "default": 1,
      "help": "1 = fichier léger, idéal Meta Quest 3. 3 = reflets complets, fichier 3× plus gros."},
-    {"key": "GS_SAM_DOWNSAMPLE", "group": "SAGA", "label": "Réduction des images pour SAM", "type": "choice", "choices": [1, 2, 4, 8], "default": 2,
-     "help": "Mettez 4 si la carte graphique manque de mémoire (l'app réessaie seule à 4 puis 8)."},
-    {"key": "GS_SAGA_RES", "group": "SAGA", "label": "Largeur des images pour SAGA", "type": "int", "min": 512, "max": 1600, "default": 1024,
-     "help": "Plus petit = moins de RAM pendant get_scale et les features. 800 si le PC manque de RAM."},
+    {"key": "GS_SAM_DOWNSAMPLE", "group": "SAGA", "label": "Réduction des images pour SAM", "type": "choice", "choices": ["auto", 1, 2, 4, 8], "default": "auto",
+     "help": "auto = selon la mémoire de la carte graphique et la taille des images. Si la carte déborde, l'app réessaie seule en plus petit."},
+    {"key": "GS_SAGA_RES", "group": "SAGA", "label": "Largeur des images pour SAGA", "type": "choice", "choices": ["auto", 640, 800, 1024, 1280, 1600], "default": "auto",
+     "help": "get_scale et features gardent toutes les vues en RAM. auto = selon la RAM libre et le nombre d'images ; réduit tout seul si ça déborde."},
     {"key": "GS_SAGA_ITERS", "group": "SAGA", "label": "Itérations SAGA", "type": "int", "min": 1000, "max": 30000, "default": 10000,
      "help": "Apprentissage des features de découpe."},
     {"key": "GS_SYNTH_VIEWS", "group": "SAGA", "label": "Vues virtuelles (PLY seul)", "type": "int", "min": 50, "max": 1000, "default": 300,
@@ -72,13 +72,27 @@ def settings_path():
 def read_settings():
     vals = {s["key"]: s["default"] for s in SETTINGS}
     try:
-        for line in open(settings_path()):
-            k, _, v = line.strip().partition("=")
-            if k in vals:
-                vals[k] = v
+        lines = open(settings_path()).read().splitlines()
     except OSError:
-        pass
+        return vals
+    v2 = "GS_SETTINGS_VERSION=2" in lines
+    for line in lines:
+        k, _, v = line.strip().partition("=")
+        if k in vals:
+            # anciens reglages : les valeurs par defaut d'avant deviennent "auto" (comme gaussian_app.sh)
+            if not v2 and (k, v) in (("GS_MAX_IMAGE_SIZE", "1600"), ("GS_SAM_DOWNSAMPLE", "2")):
+                v = "auto"
+            vals[k] = v
     return vals
+
+
+def hardware():
+    # materiel detecte par gaussian_app.sh (valeurs utilisees par les reglages "auto")
+    try:
+        out = subprocess.run(["bash", APP, "hw"], capture_output=True, text=True, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    return dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
 
 
 def validate_settings(data):
@@ -365,7 +379,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"next": JOB.offset + len(JOB.lines), "lines": lines, "progress": JOB.progress,
                                 "running": JOB.running, "rc": JOB.rc, "title": JOB.title, "reset": since < JOB.offset})
         elif u.path == "/api/settings":
-            self.send_json({"spec": SETTINGS, "values": read_settings()})
+            self.send_json({"spec": SETTINGS, "values": read_settings(), "hw": hardware()})
         elif u.path == "/api/browse":
             self.browse(q.get("path", [os.path.expanduser("~")])[0])
         elif u.path == "/api/previews":
@@ -442,6 +456,7 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as e:
                 return self.send_json({"error": str(e)}, 400)
             with open(settings_path(), "w") as f:
+                f.write("GS_SETTINGS_VERSION=2\n")
                 f.writelines(f"{k}={v}\n" for k, v in vals.items())
             return self.send_json({"ok": True, "values": vals})
         if u.path == "/api/cancel":
@@ -654,6 +669,7 @@ try { const t = localStorage.getItem('ga_theme'); if (t === 'dark' || t === 'lig
       <button onclick="preset('normal')">Normal</button>
       <button onclick="preset('quality')" title="Plus d'images, entraînement complet">💎 Qualité</button>
     </div>
+    <div class="note" id="hwNote" style="margin:6px 0 10px"></div>
     <div id="setForm"></div>
     <div class="row" style="justify-content:space-between;margin-top:14px">
       <span class="note" style="margin:0">S'applique aux étapes pas encore calculées. Pour refaire un projet existant : « Refaire depuis… » sur le projet.</span>
@@ -833,12 +849,17 @@ let SPEC = [], SAVED = {};
 const PRESETS = {
   fast: {GS_FPS: 1, GS_MAX_FRAMES: 120, GS_MAX_IMAGE_SIZE: 1280, GS_ITERS: 7000, GS_SAGA_ITERS: 5000, GS_SYNTH_VIEWS: 150},
   normal: {},
-  quality: {GS_FPS: 3, GS_MAX_FRAMES: 400, GS_MAX_IMAGE_SIZE: 1600, GS_ITERS: 30000, GS_SAGA_ITERS: 10000, GS_SYNTH_VIEWS: 400},
+  quality: {GS_FPS: 3, GS_MAX_FRAMES: 400, GS_MAX_IMAGE_SIZE: 'auto', GS_ITERS: 30000, GS_SAGA_ITERS: 10000, GS_SYNTH_VIEWS: 400},
 };
 
 async function loadSettings() {
   const j = await api('/api/settings');
   SPEC = j.spec; SAVED = j.values;
+  const hw = j.hw || {};
+  $('hwNote').textContent = hw.VRAM_MB
+    ? `🖥️ Détecté : ${hw.GPU_NAME || 'carte graphique'} (${(hw.VRAM_MB / 1024).toFixed(0)} Go), RAM libre ${(hw.RAM_MB / 1024).toFixed(0)} Go. `
+      + `« auto » s'adapte à ce matériel (résolution max ≈ ${hw.AUTO_MAX_IMAGE_SIZE} px) et réduit tout seul les images si la mémoire déborde.`
+    : '« auto » s\'adapte à la carte graphique et à la RAM, et réduit tout seul les images si la mémoire déborde.';
   let html = '', group = '';
   for (const s of SPEC) {
     if (s.group !== group) { html += (group ? '</div>' : '') + `<div class="sgroup"><h4>${esc(s.group)}</h4>`; group = s.group; }

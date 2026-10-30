@@ -44,9 +44,15 @@ MASTER_LOG="$BASE_DIR/gaussian_app.log"
 # Parametres : variable d'environnement > reglages de l'interface (settings.env) > defaut
 # ------------------------------------------------------------------------------
 if [ -f "$SETTINGS_FILE" ]; then
+    settings_v2=0; grep -q '^GS_SETTINGS_VERSION=2' "$SETTINGS_FILE" && settings_v2=1
     while IFS='=' read -r key value; do
         # Lecture stricte (jamais de "source") : GS_NOM=valeur simple uniquement
         [[ "$key" =~ ^GS_[A-Z_]+$ && "$value" =~ ^[A-Za-z0-9.,\ _-]*$ ]] || continue
+        # anciens reglages : les valeurs par defaut d'avant deviennent "auto"
+        if [ "$settings_v2" = 0 ]; then
+            [ "$key" = GS_MAX_IMAGE_SIZE ] && [ "$value" = 1600 ] && value=auto
+            [ "$key" = GS_SAM_DOWNSAMPLE ] && [ "$value" = 2 ] && value=auto
+        fi
         [ -n "${!key+x}" ] || printf -v "$key" '%s' "$value"
     done <"$SETTINGS_FILE"
 fi
@@ -54,10 +60,11 @@ GS_FPS="${GS_FPS:-2}"                          # images extraites par seconde de
 GS_MAX_FRAMES="${GS_MAX_FRAMES:-250}"          # nombre max d'images gardees par scene
 GS_ITERS="${GS_ITERS:-30000}"                  # iterations d'entrainement 3DGS
 GS_SH_DEGREE="${GS_SH_DEGREE:-1}"              # 1 = optimise Meta Quest 3 (fichier 3x plus leger)
-GS_MAX_IMAGE_SIZE="${GS_MAX_IMAGE_SIZE:-1600}" # resolution max des images (COLMAP + 3DGS)
-GS_SAM_DOWNSAMPLE="${GS_SAM_DOWNSAMPLE:-2}"    # reduction des images pour SAM (memoire GPU)
+# "auto" = choisi selon la carte graphique et la RAM du PC (voir auto_* plus bas)
+GS_MAX_IMAGE_SIZE="${GS_MAX_IMAGE_SIZE:-auto}" # resolution max des images (COLMAP + 3DGS)
+GS_SAM_DOWNSAMPLE="${GS_SAM_DOWNSAMPLE:-auto}" # reduction des images pour SAM (memoire GPU)
 GS_SAGA_ITERS="${GS_SAGA_ITERS:-10000}"        # iterations des features SAGA
-GS_SAGA_RES="${GS_SAGA_RES:-1024}"             # largeur max des images chargees par SAGA (RAM)
+GS_SAGA_RES="${GS_SAGA_RES:-auto}"             # largeur max des images chargees par SAGA (RAM)
 GS_SYNTH_VIEWS="${GS_SYNTH_VIEWS:-300}"        # vues virtuelles rendues pour un PLY seul
 GS_YOLO="${GS_YOLO:-0}"                        # 1 = YOLO masque la personne qui filme (optionnel)
 GS_YOLO_CLASSES="${GS_YOLO_CLASSES:-person}"   # classes COCO a masquer (anglais, separees par des virgules)
@@ -1312,10 +1319,17 @@ step_train() {
         info "Masques YOLO trouves : les zones masquees sont ignorees pendant l'entrainement."
     fi
     step "Entrainement 3D Gaussian Splatting ($GS_ITERS iterations, sh-degree $GS_SH_DEGREE)"
+    # largeur d'entrainement : plafond GS_MAX_IMAGE_SIZE, et toutes les images doivent tenir
+    # dans ~50 % de la RAM libre (3DGS les garde toutes en memoire)
+    local w h res
+    read -r w h <<<"$(image_dims "$S/images")"
+    res=$(fit_width "$(count_images "$S/images")" "$(image_ratio "$w" "$h")" 50)
+    [ "$res" -gt "$GS_MAX_IMAGE_SIZE" ] && res="$GS_MAX_IMAGE_SIZE"
+    [ "$res" -gt "$w" ] && res="$w"
     ( export GA_MASK_DIR="$mask_dir"
-      saga_py train_scene.py -s "$S" -m "$S/model" --sh_degree "$GS_SH_DEGREE" \
-        --iterations "$GS_ITERS" --save_iterations "$GS_ITERS" --data_device cpu --quiet ) \
-        || { err "Entrainement 3DGS echoue."; return 1; }
+      saga_retry "Entrainement 3DGS" "$res" "$w" train_scene.py -s "$S" -m "$S/model" \
+        --sh_degree "$GS_SH_DEGREE" --iterations "$GS_ITERS" --save_iterations "$GS_ITERS" --quiet ) \
+        || return 1
     [ -n "$(scene_iter "$S")" ] || { err "Aucun modele produit."; return 1; }
 }
 
@@ -1467,8 +1481,6 @@ saga_run() {
     elif [ "$rc" = 137 ] || [ "$rc" = 9 ] || grep -qE "^Killed|MemoryError" "$out"; then
         SAGA_FAIL=ram
         err "$label : RAM du PC saturee, Linux a arrete le programme (code $rc)."
-        echo "  -> Reglages > SAGA : baissez 'Largeur des images pour SAGA' (ex. 800, actuel $GS_SAGA_RES)"
-        echo "     ou importez moins d'images, puis relancez."
         command -v free &>/dev/null && free -h | sed 's/^/     /'
     else
         SAGA_FAIL=autre
@@ -1479,23 +1491,98 @@ saga_run() {
     return 1
 }
 
-saga_res_args() {
-    # Images reduites pour get_scale / features : seule la RAM change, pas la decoupe
-    # (les masques SAM sont deja reduits). Jamais d'agrandissement.
-    local S="$1" w
-    w=$(python - "$S/images" <<'PY' 2>/dev/null
+# ------------------------------------------------------------------------------
+# Auto-adaptation au materiel : les reglages "auto" sont choisis selon la memoire de
+# la carte graphique et la RAM libre ; si une etape deborde quand meme, elle est
+# relancee toute seule avec des images plus petites.
+# ------------------------------------------------------------------------------
+HW_VRAM_MB=""; HW_RAM_MB=""
+
+hw_detect() {
+    [ -n "$HW_VRAM_MB" ] && return 0
+    HW_VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -dc '0-9')
+    HW_RAM_MB=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo 2>/dev/null)
+    [ -n "$HW_VRAM_MB" ] || HW_VRAM_MB=8192   # inconnu : on suppose une carte 8 Go
+    [ -n "$HW_RAM_MB" ] || HW_RAM_MB=16384    # et 16 Go de RAM libre
+}
+
+hw_summary() { hw_detect; echo "carte graphique $((HW_VRAM_MB / 1024)) Go, RAM libre $((HW_RAM_MB / 1024)) Go"; }
+
+fit_width() {
+    # fit_width <nb images> <hauteur/largeur> <% de la RAM libre> : plus grande largeur
+    # (multiple de 64, 512 mini) pour que toutes les images (float32 RGB) tiennent dans ce budget
+    hw_detect
+    awk -v n="$1" -v a="$2" -v p="$3" -v ram="$HW_RAM_MB" 'BEGIN {
+        if (n < 1) n = 1; if (a <= 0) a = 0.5625
+        w = int(sqrt(ram * 1048576 * p / 100 / (n * 12 * a)) / 64) * 64
+        print (w < 512 ? 512 : w) }'
+}
+
+shrink_width() {
+    # 3/4 de la largeur (multiple de 64) ; 0 si on est deja au minimum
+    local r=$(($1 * 3 / 4 / 64 * 64))
+    [ "$r" -lt 512 ] && r=0
+    echo "$r"
+}
+
+auto_image_size() {
+    # resolution COLMAP / 3DGS : selon la memoire video, et la RAM pour GS_MAX_FRAMES images
+    hw_detect
+    local cap ram
+    if [ "$HW_VRAM_MB" -lt 6000 ]; then cap=1024
+    elif [ "$HW_VRAM_MB" -lt 15000 ]; then cap=1600
+    elif [ "$HW_VRAM_MB" -lt 22000 ]; then cap=2000
+    else cap=2400; fi
+    ram=$(fit_width "$GS_MAX_FRAMES" 0.5625 50)
+    [ "$ram" -lt "$cap" ] && cap=$ram
+    echo "$cap"
+}
+
+image_dims() {
+    # largeur hauteur de la premiere image d'un dossier (0 0 si aucune)
+    python - "$1" <<'PY' 2>/dev/null || echo "0 0"
 import os, sys
 from PIL import Image
 d = sys.argv[1]
 f = sorted(x for x in os.listdir(d) if x.lower().endswith((".jpg", ".jpeg", ".png")))
-print(Image.open(os.path.join(d, f[0])).size[0] if f else 0)
+print(*(Image.open(os.path.join(d, f[0])).size if f else (0, 0)))
 PY
-)
-    if [ "${w:-0}" -gt "$GS_SAGA_RES" ] 2>/dev/null; then
-        echo "--resolution $GS_SAGA_RES --data_device cpu"
+}
+
+image_ratio() { awk -v w="$1" -v h="$2" 'BEGIN { print (w > 0 ? h / w : 0.5625) }'; }
+
+auto_sam_ds() {
+    # reduction SAM : la plus faible qui ramene les images a une largeur que la carte supporte
+    local S="$1" w h target ds=1
+    if [ "$GS_SAM_DOWNSAMPLE" != auto ]; then echo "$GS_SAM_DOWNSAMPLE"; return; fi
+    hw_detect
+    read -r w h <<<"$(image_dims "$S/images")"
+    if [ "$HW_VRAM_MB" -lt 7000 ]; then target=640
+    elif [ "$HW_VRAM_MB" -lt 9000 ]; then target=800
+    elif [ "$HW_VRAM_MB" -lt 13000 ]; then target=1024
+    elif [ "$HW_VRAM_MB" -lt 20000 ]; then target=1600
+    else target=2400; fi
+    while [ "$((w / ds))" -gt "$target" ] && [ "$ds" -lt 8 ]; do ds=$((ds * 2)); done
+    echo "$ds"
+}
+
+auto_saga_res() {
+    # largeur des images chargees par get_scale / features : toutes les vues restent en RAM,
+    # on vise ~35 % de la RAM libre (les masques SAM, deja reduits, ne changent pas)
+    local S="$1" w h r
+    read -r w h <<<"$(image_dims "$S/images")"
+    if [ "$GS_SAGA_RES" != auto ]; then r="$GS_SAGA_RES"
     else
-        echo "--data_device cpu"
+        r=$(fit_width "$(count_images "$S/images")" "$(image_ratio "$w" "$h")" 35)
+        [ "$r" -gt 1600 ] && r=1600
     fi
+    [ "$r" -gt "$w" ] && r="$w"   # jamais d'agrandissement
+    echo "$r"
+}
+
+res_arg() {
+    # res_arg <largeur voulue> <largeur des images> : option --resolution de 3DGS / SAGA
+    if [ "$1" -lt "$2" ]; then echo "$1"; else echo 1; fi   # 1 = taille d'origine
 }
 
 step_sam() {
@@ -1503,16 +1590,17 @@ step_sam() {
     ni=$(count_images "$S/images"); nm=$(count_files "$S/sam_masks" pt)
     if [ "$nm" -ge "$ni" ]; then ok "Masques SAM deja calcules ($nm)."; return 0; fi
     ensure_saga
-    ds="$GS_SAM_DOWNSAMPLE"
+    ds=$(auto_sam_ds "$S")
     while true; do
         step "SAGA 1/3 : masques 2D Segment Anything ($ni images, reduction x$ds, peut etre long)"
+        [ "$GS_SAM_DOWNSAMPLE" = auto ] && info "Reduction choisie automatiquement ($(hw_summary))."
         saga_run "Extraction SAM" extract_segment_everything_masks.py --image_root "$S" \
             --sam_checkpoint_path "$SAM_MODEL" --sam_arch vit_h --downsample "$ds" --downsample_type image \
             && return 0
         # memoire GPU : on reessaie tout seul avec des images plus petites
         if [ "$SAGA_FAIL" = gpu ] && [ "$ds" -lt 8 ]; then
             ds=$((ds * 2))
-            warn "Nouvel essai automatique avec une reduction x$ds (Reglages > SAGA > Reduction des images pour SAM)."
+            warn "Nouvel essai automatique avec une reduction x$ds."
             rm -rf "$S/sam_masks"
             continue
         fi
@@ -1520,24 +1608,44 @@ step_sam() {
     done
 }
 
+saga_retry() {
+    # saga_retry <etiquette> <largeur> <largeur images> <script.py> [args...]
+    # relance avec des images 25 % plus petites tant que la RAM ou la carte deborde
+    local label="$1" res="$2" w="$3" next; shift 3
+    while true; do
+        info "$label : images de $res px de large ($(hw_summary))."
+        saga_run "$label" "$@" --resolution "$(res_arg "$res" "$w")" --data_device cpu && return 0
+        case "$SAGA_FAIL" in ram|gpu) ;; *) return 1 ;; esac
+        next=$(shrink_width "$res")
+        if [ "$next" = 0 ]; then
+            err "$label : meme en $res px ca ne passe pas. Importez moins d'images."
+            return 1
+        fi
+        warn "Nouvel essai automatique avec des images de $next px."
+        res="$next"
+    done
+}
+
 step_scale() {
-    local S="$1" ni ns
+    local S="$1" ni ns w h
     ni=$(count_images "$S/images"); ns=$(count_files "$S/mask_scales" pt)
     if [ "$ns" -ge "$ni" ]; then ok "Echelles 3D deja calculees."; return 0; fi
     ensure_saga
     step "SAGA 2/3 : echelles 3D des masques (get_scale)"
-    # shellcheck disable=SC2046
-    saga_run "get_scale" get_scale.py --image_root "$S" --model_path "$S/model" $(saga_res_args "$S")
+    read -r w h <<<"$(image_dims "$S/images")"
+    saga_retry "get_scale" "$(auto_saga_res "$S")" "$w" \
+        get_scale.py --image_root "$S" --model_path "$S/model"
 }
 
 step_features() {
-    local S="$1"
+    local S="$1" w h
     if [ -n "$(feat_iter "$S")" ]; then ok "Features SAGA deja entrainees."; return 0; fi
     ensure_saga
     step "SAGA 3/3 : apprentissage des features 3D ($GS_SAGA_ITERS iterations)"
-    # shellcheck disable=SC2046
-    saga_run "Features SAGA" train_contrastive_feature.py -m "$S/model" --iterations "$GS_SAGA_ITERS" \
-        --num_sampled_rays 1000 $(saga_res_args "$S") || return 1
+    read -r w h <<<"$(image_dims "$S/images")"
+    saga_retry "Features SAGA" "$(auto_saga_res "$S")" "$w" \
+        train_contrastive_feature.py -m "$S/model" --iterations "$GS_SAGA_ITERS" --num_sampled_rays 1000 \
+        || return 1
     [ -n "$(feat_iter "$S")" ] || { err "Features SAGA non produites."; return 1; }
 }
 
@@ -2075,6 +2183,15 @@ cmd_ui() {
     exec python3 "$SCRIPT_DIR/gaussian_app_ui.py" --app "$SELF_PATH" --base "$BASE_DIR" --port "$GS_UI_PORT" "$@"
 }
 
+cmd_hw() {
+    # Materiel detecte et valeurs "auto" (lu par l'interface)
+    hw_detect
+    echo "GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -n1)"
+    echo "VRAM_MB=$HW_VRAM_MB"
+    echo "RAM_MB=$HW_RAM_MB"
+    echo "AUTO_MAX_IMAGE_SIZE=$(auto_image_size)"
+}
+
 cmd_install_agy() {
     title "🛰️  Installation d'Antigravity CLI (sans droits root)"
     curl -fsSL https://antigravity.google/cli/install.sh | bash || return 1
@@ -2216,7 +2333,11 @@ cmd_menu() {
 main() {
     local cmd="${1:-ui}"
     [ $# -gt 0 ] && shift
+    case "$cmd" in ui|menu|help|-h|--help|hw) ;;
+        *) [ "$GS_MAX_IMAGE_SIZE" = auto ] && GS_MAX_IMAGE_SIZE=$(auto_image_size) ;;
+    esac
     case "$cmd" in
+        hw)               cmd_hw ;;
         ui)               cmd_ui "$@" ;;
         menu)             cmd_menu ;;
         help|-h|--help)   cmd_help ;;
