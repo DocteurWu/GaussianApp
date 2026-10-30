@@ -11,3 +11,4 @@ input_video/*
 *.mp4
 *.insv
 *.zip
+__pycache__/
