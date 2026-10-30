@@ -30,8 +30,7 @@ Tout s'installe **automatiquement, sans sudo** : conda, FFmpeg, COLMAP, PyTorch 
 10. [Réglages](#10-réglages)
 11. [Ligne de commande](#11-ligne-de-commande)
 12. [Organisation des dossiers](#12-organisation-des-dossiers)
-13. [Pourquoi SAGA ne marchait pas avant, et ce qui a été corrigé](#13-pourquoi-saga-ne-marchait-pas-avant-et-ce-qui-a-été-corrigé)
-14. [Dépannage](#14-dépannage)
+13. [Dépannage](#13-dépannage)
 
 ---
 
@@ -209,8 +208,9 @@ Carte **⚙️ Réglages** de l'interface, avec trois préréglages : **⚡ Essa
 | `GS_MAX_IMAGE_SIZE` | 1600 | résolution max (COLMAP + entraînement) |
 | `GS_ITERS` | 30000 | itérations 3DGS (7000 = essai rapide) |
 | `GS_SH_DEGREE` | 1 | reflets : 1 = léger (Quest 3), 3 = complets |
-| `GS_SAM_DOWNSAMPLE` | 2 | réduction des images pour SAM (4 si la mémoire GPU manque) |
+| `GS_SAM_DOWNSAMPLE` | 2 | réduction des images pour SAM. Si la mémoire GPU manque, l'app réessaie seule à 4 puis 8 |
 | `GS_SAGA_ITERS` | 10000 | itérations des features SAGA |
+| `GS_SAGA_RES` | 1024 | largeur max des images chargées par SAGA (get_scale, features). 800 si le PC manque de RAM |
 | `GS_SYNTH_VIEWS` | 300 | vues virtuelles pour un PLY seul |
 | `GS_360` | auto | `auto`, `1` (forcer) ou `0` (désactiver) |
 | `GS_360_MAX_IMAGES` / `GS_360_SIZE` / `GS_360_FOV` | 480 / 1280 / 100 | vues 360° : nombre, taille, champ |
@@ -277,8 +277,9 @@ GaussianApp/
 | `Aucun GPU NVIDIA détecté` | Vérifier `nvidia-smi`. Le pilote doit être installé par un admin |
 | Le navigateur ne s'ouvre pas | Ouvrir **http://localhost:7860** à la main, ou `GS_UI_PORT=7861 bash gaussian_app.sh` si le port est pris |
 | Pas d'écran (connexion SSH) | `bash gaussian_app.sh menu`, ou `ssh -L 7860:localhost:7860 …` puis ouvrir le navigateur sur son propre PC. La découpe SAGA a besoin d'un écran |
-| CUDA out of memory pendant SAM | `GS_SAM_DOWNSAMPLE=4` |
-| Manque de RAM pendant SAGA | baisser `GS_MAX_FRAMES` / `GS_MAX_IMAGE_SIZE` (ou `GS_360_MAX_IMAGES`), puis **↺ Refaire depuis…** |
+| CUDA out of memory pendant SAM | l'app réessaie seule (×4, puis ×8). Sinon : Réglages > SAGA > Réduction des images pour SAM |
+| « RAM du PC saturée » / code 137 | Réglages > SAGA > Largeur des images pour SAGA = 800, puis relancer. Pour suivre la RAM en direct : `free -h` ou `htop` dans un autre terminal |
+| Voir l'erreur complète d'une étape SAGA | `.gaussian_app/last_saga_run.txt` (dernier programme SAGA lancé) ou `gaussian_app.log` |
 | COLMAP ne trouve pas assez de caméras | filmer plus lentement, augmenter `GS_FPS`, éviter les surfaces unies et les reflets |
 | Installation cassée | supprimer `.gaussian_app/saga_ok`, puis **⬇ Tout installer** |
 | Autre | envoyer `gaussian_app.log` à Claude |

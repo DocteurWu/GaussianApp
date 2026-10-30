@@ -57,6 +57,7 @@ GS_SH_DEGREE="${GS_SH_DEGREE:-1}"              # 1 = optimise Meta Quest 3 (fich
 GS_MAX_IMAGE_SIZE="${GS_MAX_IMAGE_SIZE:-1600}" # resolution max des images (COLMAP + 3DGS)
 GS_SAM_DOWNSAMPLE="${GS_SAM_DOWNSAMPLE:-2}"    # reduction des images pour SAM (memoire GPU)
 GS_SAGA_ITERS="${GS_SAGA_ITERS:-10000}"        # iterations des features SAGA
+GS_SAGA_RES="${GS_SAGA_RES:-1024}"             # largeur max des images chargees par SAGA (RAM)
 GS_SYNTH_VIEWS="${GS_SYNTH_VIEWS:-300}"        # vues virtuelles rendues pour un PLY seul
 GS_YOLO="${GS_YOLO:-0}"                        # 1 = YOLO masque la personne qui filme (optionnel)
 GS_YOLO_CLASSES="${GS_YOLO_CLASSES:-person}"   # classes COCO a masquer (anglais, separees par des virgules)
@@ -449,6 +450,84 @@ print("[OK] SAGA : recherche de voisins rapide (arbre KD) a la place de pytorch3
 PY
 }
 
+patch_saga_lowmem() {
+    # get_scale.py charge les masques SAM de TOUTES les vues d'un coup, convertis en float32
+    # (~300 Mo par vue) : 581 vues = ~170 Go de RAM, Linux tue le processus (code 137).
+    # train_contrastive_feature.py les garde aussi tous en RAM via les cameras.
+    # On les lit sur le disque au moment ou une vue en a besoin (une seule en memoire).
+    python3 - "$SAGA_DIR" <<'PY'
+import os, re, sys
+root = sys.argv[1]
+def rw(rel, fn):
+    p = os.path.join(root, rel)
+    if not os.path.isfile(p):
+        return
+    src = open(p, encoding="utf-8", newline="").read()
+    if "GAUSSIAN_APP_LOWMEM" in src:
+        return
+    new = fn(src, "\r\n" if "\r\n" in src else "\n")
+    if new is None:
+        print(f"[WARN] {rel} inattendu : chargement des masques non allege.")
+        return
+    open(p, "w", encoding="utf-8", newline="").write(new)
+    print(f"[OK] SAGA : {rel} lit les masques SAM a la demande (economie de RAM).")
+
+def readers(src, nl):
+    # le masque devient un chemin ; la camera le lira quand on lui demande
+    lines = src.splitlines(keepends=True)
+    for i, l in enumerate(lines):
+        if re.match(r"\s*masks = torch\.load\(os\.path\.join\(masks_folder,", l):
+            ind = l[:len(l) - len(l.lstrip())]
+            lines[i] = (f"{ind}# GAUSSIAN_APP_LOWMEM : chemin du masque, lu a la demande par la camera{nl}"
+                        f"{ind}masks = os.path.join(masks_folder, image_name.split('.')[0] + \".pt\") if masks_folder is not None else None{nl}")
+            return "".join(lines)
+    return None
+
+def cameras(src, nl):
+    m = re.search(r"^class Camera\(nn\.Module\):\r?\n", src, re.M)
+    if not m:
+        return None
+    prop = nl.join([
+        "    # GAUSSIAN_APP_LOWMEM : masques SAM lus sur le disque a la demande (un seul en RAM)",
+        "    _ga_cache = [None, None]",
+        "    @property",
+        "    def original_masks(self):",
+        "        m = self.__dict__.get('_ga_masks')",
+        "        if isinstance(m, str):",
+        "            c = Camera._ga_cache",
+        "            if c[0] != m:",
+        "                c[0], c[1] = None, None",
+        "                c[1] = torch.load(m, map_location='cpu')",
+        "                c[0] = m",
+        "            return c[1]",
+        "        return m",
+        "    @original_masks.setter",
+        "    def original_masks(self, v):",
+        "        self.__dict__['_ga_masks'] = v",
+        "",
+    ])
+    return src[:m.end()] + prop + nl + src[m.end():]
+
+def get_scale(src, nl):
+    a = "masks = torch.load(os.path.join(os.path.join(dataset.source_path, 'sam_masks')"
+    b = "images_masks[image_path.split('.')[0]] = masks.cpu().float()"
+    c = "corresponding_masks = images_masks[view.image_name]"
+    if a not in src or b not in src or c not in src:
+        return None
+    src = src.replace(a, "masks = (os.path.join(os.path.join(dataset.source_path, 'sam_masks')", 1)
+    src = src.replace(b, "images_masks[image_path.split('.')[0]] = masks  # GAUSSIAN_APP_LOWMEM : chemin seulement", 1)
+    src = src.replace(c, "corresponding_masks = torch.load(images_masks[view.image_name], map_location='cpu').float()", 1)
+    # lecture inutile de chaque image (jamais utilisee ensuite)
+    src = re.sub(r"^( *)image = cv2\.imread\(os\.path\.join\(os\.path\.join\(dataset\.source_path, 'images'\), image_path\)\)\r?\n"
+                 r"\1image = cv2\.cvtColor\(image, cv2\.COLOR_BGR2RGB\)\r?\n", "", src, count=1, flags=re.M)
+    return src
+
+rw("scene/dataset_readers.py", readers)
+rw("scene/cameras.py", cameras)
+rw("get_scale.py", get_scale)
+PY
+}
+
 patch_saga_training() {
     # "Mask Mode: Ignore" (comme LichtFeld Studio) dans l'entrainement 3DGS de SAGA :
     # si GA_MASK_DIR est defini, les pixels masques (noirs) ne comptent pas dans l'erreur.
@@ -695,6 +774,7 @@ ensure_saga() {
     patch_saga_loader
     patch_saga_training
     patch_saga_knn
+    patch_saga_lowmem
     if ! saga_activate || [ -n "$(saga_missing)" ]; then
         info "Installation / reparation de l'environnement SAGA..."
         install_saga_env
@@ -710,7 +790,7 @@ ensure_saga() {
 
 saga_py() {
     # Lance un script SAGA depuis son dossier
-    ( cd "$SAGA_DIR" && python "$@" )
+    ( cd "$SAGA_DIR" && PYTHONUNBUFFERED=1 python "$@" )
 }
 
 # ------------------------------------------------------------------------------
@@ -1370,15 +1450,74 @@ print(f"[OK] {kept} vues virtuelles rendues.")
 PY
 }
 
+SAGA_FAIL=""   # cause du dernier echec de saga_run : ram | gpu | autre
+
+saga_run() {
+    # saga_run <etiquette> <script.py> [args...] : lance un script SAGA, garde sa sortie,
+    # et en cas d'echec explique la cause (RAM, memoire GPU) au lieu d'un simple "echoue"
+    local label="$1"; shift
+    local out="$STATE_DIR/last_saga_run.txt" rc
+    SAGA_FAIL=""
+    saga_py "$@" 2>&1 | tee "$out"
+    rc=${PIPESTATUS[0]}
+    [ "$rc" = 0 ] && return 0
+    if grep -qiE "CUDA out of memory|OutOfMemoryError|CUBLAS_STATUS_ALLOC_FAILED" "$out"; then
+        SAGA_FAIL=gpu
+        err "$label : memoire de la CARTE GRAPHIQUE insuffisante (code $rc)."
+    elif [ "$rc" = 137 ] || [ "$rc" = 9 ] || grep -qE "^Killed|MemoryError" "$out"; then
+        SAGA_FAIL=ram
+        err "$label : RAM du PC saturee, Linux a arrete le programme (code $rc)."
+        echo "  -> Reglages > SAGA : baissez 'Largeur des images pour SAGA' (ex. 800, actuel $GS_SAGA_RES)"
+        echo "     ou importez moins d'images, puis relancez."
+        command -v free &>/dev/null && free -h | sed 's/^/     /'
+    else
+        SAGA_FAIL=autre
+        err "$label : echec (code $rc). Dernieres lignes du programme :"
+        grep -v '^\s*$' "$out" | tail -n 15 | sed 's/^/  | /'
+    fi
+    echo "  Sortie complete : $out et $MASTER_LOG"
+    return 1
+}
+
+saga_res_args() {
+    # Images reduites pour get_scale / features : seule la RAM change, pas la decoupe
+    # (les masques SAM sont deja reduits). Jamais d'agrandissement.
+    local S="$1" w
+    w=$(python - "$S/images" <<'PY' 2>/dev/null
+import os, sys
+from PIL import Image
+d = sys.argv[1]
+f = sorted(x for x in os.listdir(d) if x.lower().endswith((".jpg", ".jpeg", ".png")))
+print(Image.open(os.path.join(d, f[0])).size[0] if f else 0)
+PY
+)
+    if [ "${w:-0}" -gt "$GS_SAGA_RES" ] 2>/dev/null; then
+        echo "--resolution $GS_SAGA_RES --data_device cpu"
+    else
+        echo "--data_device cpu"
+    fi
+}
+
 step_sam() {
-    local S="$1" ni nm
+    local S="$1" ni nm ds
     ni=$(count_images "$S/images"); nm=$(count_files "$S/sam_masks" pt)
     if [ "$nm" -ge "$ni" ]; then ok "Masques SAM deja calcules ($nm)."; return 0; fi
     ensure_saga
-    step "SAGA 1/3 : masques 2D Segment Anything ($ni images, peut etre long)"
-    saga_py extract_segment_everything_masks.py --image_root "$S" --sam_checkpoint_path "$SAM_MODEL" \
-        --sam_arch vit_h --downsample "$GS_SAM_DOWNSAMPLE" --downsample_type image \
-        || { err "Extraction SAM echouee (memoire GPU ? essayez GS_SAM_DOWNSAMPLE=4)."; return 1; }
+    ds="$GS_SAM_DOWNSAMPLE"
+    while true; do
+        step "SAGA 1/3 : masques 2D Segment Anything ($ni images, reduction x$ds, peut etre long)"
+        saga_run "Extraction SAM" extract_segment_everything_masks.py --image_root "$S" \
+            --sam_checkpoint_path "$SAM_MODEL" --sam_arch vit_h --downsample "$ds" --downsample_type image \
+            && return 0
+        # memoire GPU : on reessaie tout seul avec des images plus petites
+        if [ "$SAGA_FAIL" = gpu ] && [ "$ds" -lt 8 ]; then
+            ds=$((ds * 2))
+            warn "Nouvel essai automatique avec une reduction x$ds (Reglages > SAGA > Reduction des images pour SAM)."
+            rm -rf "$S/sam_masks"
+            continue
+        fi
+        return 1
+    done
 }
 
 step_scale() {
@@ -1387,7 +1526,8 @@ step_scale() {
     if [ "$ns" -ge "$ni" ]; then ok "Echelles 3D deja calculees."; return 0; fi
     ensure_saga
     step "SAGA 2/3 : echelles 3D des masques (get_scale)"
-    saga_py get_scale.py --image_root "$S" --model_path "$S/model" || { err "get_scale echoue."; return 1; }
+    # shellcheck disable=SC2046
+    saga_run "get_scale" get_scale.py --image_root "$S" --model_path "$S/model" $(saga_res_args "$S")
 }
 
 step_features() {
@@ -1395,8 +1535,9 @@ step_features() {
     if [ -n "$(feat_iter "$S")" ]; then ok "Features SAGA deja entrainees."; return 0; fi
     ensure_saga
     step "SAGA 3/3 : apprentissage des features 3D ($GS_SAGA_ITERS iterations)"
-    saga_py train_contrastive_feature.py -m "$S/model" --iterations "$GS_SAGA_ITERS" --num_sampled_rays 1000 \
-        || { err "Entrainement des features SAGA echoue."; return 1; }
+    # shellcheck disable=SC2046
+    saga_run "Features SAGA" train_contrastive_feature.py -m "$S/model" --iterations "$GS_SAGA_ITERS" \
+        --num_sampled_rays 1000 $(saga_res_args "$S") || return 1
     [ -n "$(feat_iter "$S")" ] || { err "Features SAGA non produites."; return 1; }
 }
 
@@ -1984,7 +2125,7 @@ $APP_NAME - Gaussian Splatting + decoupe SAGA, tout-en-un
   install-agy                   Installe Antigravity CLI
 
 Reglages : GS_FPS=$GS_FPS GS_MAX_FRAMES=$GS_MAX_FRAMES GS_ITERS=$GS_ITERS GS_SH_DEGREE=$GS_SH_DEGREE
-           GS_MAX_IMAGE_SIZE=$GS_MAX_IMAGE_SIZE GS_SAM_DOWNSAMPLE=$GS_SAM_DOWNSAMPLE GS_SAGA_ITERS=$GS_SAGA_ITERS
+           GS_MAX_IMAGE_SIZE=$GS_MAX_IMAGE_SIZE GS_SAM_DOWNSAMPLE=$GS_SAM_DOWNSAMPLE GS_SAGA_ITERS=$GS_SAGA_ITERS GS_SAGA_RES=$GS_SAGA_RES
            GS_SYNTH_VIEWS=$GS_SYNTH_VIEWS GS_YOLO=$GS_YOLO GS_YOLO_CLASSES=$GS_YOLO_CLASSES
            GS_360=$GS_360 GS_360_MAX_IMAGES=$GS_360_MAX_IMAGES GS_360_SIZE=$GS_360_SIZE GS_360_FOV=$GS_360_FOV GS_360_POLES=$GS_360_POLES
            (modifiables dans l'interface, enregistres dans $SETTINGS_FILE)
