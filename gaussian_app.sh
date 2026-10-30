@@ -2326,6 +2326,34 @@ cmd_hw() {
     echo "LICHTFELD=$(find_lichtfeld 2>/dev/null)"
 }
 
+cmd_install_claude() {
+    # Claude Code (assistant en ligne de commande) : installateur officiel, tout va dans
+    # ~/.local (aucun droit admin). Connexion ensuite avec son compte Claude au 1er lancement.
+    title "🤖 Installation de Claude Code (sans droits admin)"
+    local bin="$HOME/.local/bin" inst="$STATE_DIR/downloads/claude_install.sh"
+    if [ -x "$bin/claude" ] || command -v claude &>/dev/null; then
+        ok "Claude Code deja installe : $(command -v claude || echo "$bin/claude")"
+    else
+        mkdir -p "$STATE_DIR/downloads"
+        download "https://claude.ai/install.sh" "$inst" || die "Telechargement de l'installateur Claude Code impossible."
+        bash "$inst" || die "Installation de Claude Code echouee (voir ci-dessus)."
+        rm -f "$inst"
+    fi
+    # ~/.local/bin dans le PATH des prochains terminaux
+    if ! grep -qs 'HOME/.local/bin' "$HOME/.bashrc"; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"   # Claude Code (ajoute par Gaussian App)' >>"$HOME/.bashrc"
+        info "~/.local/bin ajoute au PATH dans ~/.bashrc."
+    fi
+    export PATH="$bin:$PATH"
+    command -v claude &>/dev/null && ok "Claude Code : $(claude --version 2>/dev/null)"
+    echo ""
+    echo "Pour parler a Claude sur ce PC, ouvrez un NOUVEAU terminal puis :"
+    echo "    cd \"$SCRIPT_DIR\""
+    echo "    claude"
+    echo "Au premier lancement, connectez-vous avec votre compte Claude (le navigateur s'ouvre)."
+    echo "Claude pourra lire $(basename "$MASTER_LOG") et .gaussian_app/last_saga_run.txt pour diagnostiquer."
+}
+
 cmd_install_agy() {
     title "🛰️  Installation d'Antigravity CLI (sans droits root)"
     curl -fsSL https://antigravity.google/cli/install.sh | bash || return 1
@@ -2374,6 +2402,7 @@ $APP_NAME - Gaussian Splatting + decoupe SAGA, tout-en-un
   status                        Etat des outils et des projets
   install-launcher              Raccourci dans le menu des applications
   install-agy                   Installe Antigravity CLI
+  install-claude                Installe Claude Code (assistant, sans droits admin)
 
 Reglages : GS_FPS=$GS_FPS GS_MAX_FRAMES=$GS_MAX_FRAMES GS_ITERS=$GS_ITERS GS_SH_DEGREE=$GS_SH_DEGREE
            GS_MAX_IMAGE_SIZE=$GS_MAX_IMAGE_SIZE GS_SAM_DOWNSAMPLE=$GS_SAM_DOWNSAMPLE GS_SAGA_ITERS=$GS_SAGA_ITERS GS_SAGA_RES=$GS_SAGA_RES
@@ -2394,6 +2423,7 @@ MENU_ITEMS=(
     gui      "Decouper un objet avec SAGA"
     build    "Traiter toutes les videos de input_video/"
     install  "Installer / reparer tout"
+    install-claude "Installer Claude Code (assistant)"
     status   "Etat des outils et projets"
     quit     "Quitter"
 )
@@ -2487,6 +2517,7 @@ main() {
         clean)            start_logging "clean"; cmd_clean "$@" ;;
         status)           cmd_status ;;
         install-agy)      cmd_install_agy ;;
+        install-claude)   cmd_install_claude ;;
         install-launcher) cmd_install_launcher ;;
         *) err "Commande inconnue : $cmd"; cmd_help; exit 1 ;;
     esac

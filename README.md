@@ -324,4 +324,21 @@ GaussianApp/
 | Voir l'erreur complète d'une étape SAGA | `.gaussian_app/last_saga_run.txt` (dernier programme SAGA lancé) ou `gaussian_app.log` |
 | COLMAP ne trouve pas assez de caméras | filmer plus lentement, augmenter `GS_FPS`, éviter les surfaces unies et les reflets |
 | Installation cassée | supprimer `.gaussian_app/saga_ok`, puis **⬇ Tout installer** |
-| Autre | envoyer `gaussian_app.log` à Claude |
+| Autre | envoyer `gaussian_app.log` à Claude, ou demander directement à Claude sur le PC (ci-dessous) |
+
+### Parler à Claude directement sur le PC Linux
+
+Bouton **🤖 Installer Claude** dans l'interface, ou dans un terminal :
+
+```bash
+bash gaussian_app.sh install-claude
+```
+
+L'app lance l'installateur officiel de Claude Code. Il s'installe dans `~/.local/bin`, **sans droits admin**. Ensuite, dans un **nouveau** terminal :
+
+```bash
+cd GaussianApp
+claude
+```
+
+Au premier lancement, connectez-vous avec votre compte Claude (le navigateur s'ouvre). Claude lit le fichier `CLAUDE.md` du dossier, qui décrit l'app, les contraintes du PC et l'emplacement des logs. Il suffit alors de lui dire par exemple « get_scale a planté, regarde les logs ».

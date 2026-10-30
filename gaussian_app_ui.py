@@ -516,10 +516,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def action(self, data):
         act, p = data.get("action", ""), data.get("project", "")
-        if act not in ("install", "build") and (not NAME_RE.match(p) or not os.path.isdir(os.path.join(WORK, p))):
+        if act not in ("install", "build", "claude") and (not NAME_RE.match(p) or not os.path.isdir(os.path.join(WORK, p))):
             return self.send_json({"error": "projet inconnu"}, 400)
         table = {
             "install": ("Installation", ["install"]),
+            "claude": ("Installation de Claude Code", ["install-claude"]),
             "build": ("Videos de input_video/", ["build"]),
             "run": (f"Creer le PLY - {p}", ["run", p]),
             "saga": (f"Preparer SAGA - {p}", ["run", p, "--saga"]),
@@ -774,7 +775,8 @@ async function refresh() {
     `<span class="pill ${S.gpu ? 'ok' : 'no'}">${S.gpu ? '🟢 ' + esc(S.gpu) : '⚠️ Pas de GPU NVIDIA détecté'}</span>` +
     `<span class="pill ${i.tools ? 'ok' : 'no'}">${i.tools ? '✓' : '○'} FFmpeg · COLMAP</span>` +
     `<span class="pill ${i.saga ? 'ok' : 'no'}">${i.saga ? '✓' : '○'} SAGA</span>` +
-    `<button onclick="act('install')" ${busy ? 'disabled' : ''} title="Télécharge et installe tout ce qui manque, sans droits admin">${i.tools && i.saga ? 'Vérifier l\'installation' : '⬇ Tout installer'}</button>`);
+    `<button onclick="act('install')" ${busy ? 'disabled' : ''} title="Télécharge et installe tout ce qui manque, sans droits admin">${i.tools && i.saga ? 'Vérifier l\'installation' : '⬇ Tout installer'}</button>` +
+    `<button onclick="act('claude')" ${busy ? 'disabled' : ''} title="Assistant Claude Code dans le terminal, sans droits admin : il peut lire les logs et corriger les erreurs">🤖 Installer Claude</button>`);
   renderProjects();
   $('outdir').textContent = S.base + '/output_ply';
   setHTML('outputs', S.outputs.length ? S.outputs.map(f =>
