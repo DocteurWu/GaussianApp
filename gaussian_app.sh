@@ -65,6 +65,8 @@ GS_MAX_IMAGE_SIZE="${GS_MAX_IMAGE_SIZE:-auto}" # resolution max des images (COLM
 GS_SAM_DOWNSAMPLE="${GS_SAM_DOWNSAMPLE:-auto}" # reduction des images pour SAM (memoire GPU)
 GS_SAGA_ITERS="${GS_SAGA_ITERS:-10000}"        # iterations des features SAGA
 GS_SAGA_RES="${GS_SAGA_RES:-auto}"             # largeur max des images chargees par SAGA (RAM)
+GS_TRAINER="${GS_TRAINER:-auto}"               # entrainement 3DGS : auto (LichtFeld s'il est installe) | saga | lichtfeld
+GS_LICHTFELD="${GS_LICHTFELD:-}"               # chemin de LichtFeld-Studio (vide = recherche automatique)
 GS_SYNTH_VIEWS="${GS_SYNTH_VIEWS:-300}"        # vues virtuelles rendues pour un PLY seul
 GS_YOLO="${GS_YOLO:-0}"                        # 1 = YOLO masque la personne qui filme (optionnel)
 GS_YOLO_CLASSES="${GS_YOLO_CLASSES:-person}"   # classes COCO a masquer (anglais, separees par des virgules)
@@ -1305,6 +1307,126 @@ step_colmap() {
     ok "Cameras calculees pour $(count_images "$S/images") images."
 }
 
+# ------------------------------------------------------------------------------
+# LichtFeld Studio (optionnel) : entraine le 3DGS a la place de SAGA s'il est installe.
+# Options d'apres la documentation officielle (wiki Command-Line-Options) :
+#   -d donnees COLMAP, -o sortie, -i iterations, --headless, --sh-degree, --max-width
+# Le PLY produit (splat_<iter>.ply) est range au format SAGA (cfg_args + scene_point_cloud.ply).
+# ------------------------------------------------------------------------------
+find_lichtfeld() {
+    local c
+    if [ -n "$GS_LICHTFELD" ]; then
+        [ -x "$GS_LICHTFELD" ] && { echo "$GS_LICHTFELD"; return 0; }
+        return 1
+    fi
+    for c in LichtFeld-Studio lichtfeld-studio LichtFeld-Studio.AppImage lichtfeld; do
+        command -v "$c" 2>/dev/null && return 0
+    done
+    # dossiers de compilation / AppImage habituels dans le dossier personnel et /opt
+    find "$HOME" /opt -maxdepth 5 -type f \( -name 'LichtFeld-Studio' -o -name 'LichtFeld-Studio*.AppImage' \) \
+        -perm -u+x 2>/dev/null | head -n 1 | grep . && return 0
+    return 1
+}
+
+use_lichtfeld() {
+    # use_lichtfeld <dossier masques YOLO> : 0 si l'entrainement doit passer par LichtFeld
+    case "$GS_TRAINER" in
+        saga) return 1 ;;
+        lichtfeld)
+            find_lichtfeld >/dev/null || { warn "LichtFeld introuvable (GS_LICHTFELD=/chemin/LichtFeld-Studio) : SAGA utilise."; return 1; } ;;
+        *)  find_lichtfeld >/dev/null || return 1 ;;
+    esac
+    if [ -n "$1" ]; then
+        # format des masques de LichtFeld non garanti : l'entrainement SAGA sait ignorer les masques YOLO
+        info "Masques YOLO presents : entrainement avec SAGA (il ignore les zones masquees)."
+        return 1
+    fi
+    return 0
+}
+
+ply_matches_colmap() {
+    # ply_matches_colmap <ply> <sparse/0> : verifie que le PLY est dans le repere des cameras COLMAP
+    # (un logiciel qui recentre la scene donnerait une decoupe SAGA decalee)
+    python - "$1" "$2" <<'PY'
+import os, struct, sys
+import numpy as np
+ply, sparse = sys.argv[1:3]
+with open(ply, "rb") as f:
+    head = b""
+    while not head.endswith(b"end_header\n"):
+        head += f.readline()
+    lines = head.decode("ascii", "ignore").splitlines()
+    n = int(next(l.split()[2] for l in lines if l.startswith("element vertex")))
+    props = [l.split() for l in lines if l.startswith("property")]
+    dt = np.dtype([(p[2], {"float": "<f4", "float32": "<f4", "double": "<f8", "uchar": "u1", "uint8": "u1",
+                           "int": "<i4", "uint": "<u4", "short": "<i2", "ushort": "<u2"}[p[1]]) for p in props])
+    v = np.frombuffer(f.read(n * dt.itemsize), dtype=dt, count=n)
+xyz = np.stack([v["x"], v["y"], v["z"]], 1).astype(np.float64)
+# centres des cameras COLMAP (images.bin / images.txt)
+centers = []
+b, t = os.path.join(sparse, "images.bin"), os.path.join(sparse, "images.txt")
+def center(q, tv):
+    w, x, y, z = q
+    R = np.array([[1 - 2*y*y - 2*z*z, 2*x*y - 2*w*z, 2*x*z + 2*w*y],
+                  [2*x*y + 2*w*z, 1 - 2*x*x - 2*z*z, 2*y*z - 2*w*x],
+                  [2*x*z - 2*w*y, 2*y*z + 2*w*x, 1 - 2*x*x - 2*y*y]])
+    return -R.T @ np.array(tv)
+if os.path.isfile(b):
+    with open(b, "rb") as f:
+        for _ in range(struct.unpack("<Q", f.read(8))[0]):
+            d = struct.unpack("<i7di", f.read(64))
+            while f.read(1) != b"\x00":
+                pass
+            n2 = struct.unpack("<Q", f.read(8))[0]
+            f.read(24 * n2)
+            centers.append(center(d[1:5], d[5:8]))
+else:
+    rows = [l.split() for l in open(t) if l.strip() and not l.startswith("#")]
+    for r in rows[::2]:
+        centers.append(center(list(map(float, r[1:5])), list(map(float, r[5:8]))))
+c = np.array(centers)
+cc, cs = np.median(c, 0), np.linalg.norm(c - np.median(c, 0), axis=1).max() + 1e-6
+pc = np.median(xyz, 0)
+ratio = np.linalg.norm(pc - cc) / cs
+spread = np.percentile(np.linalg.norm(xyz - pc, axis=1), 90) / cs
+print(f"  repere : centre du PLY a {ratio:.2f}x l'etendue des cameras, taille {spread:.2f}x")
+# meme repere : le nuage est autour des cameras et a une taille du meme ordre
+sys.exit(0 if ratio < 3 and 0.05 < spread < 50 else 1)
+PY
+}
+
+train_lichtfeld() {
+    # train_lichtfeld <projet> <largeur max> : entraine avec LichtFeld, relance en plus petit si ca deborde
+    local S="$1" res="$2" lf out ply next
+    lf="$(find_lichtfeld)" || return 1
+    out="$S/lichtfeld"
+    info "Moteur d'entrainement : LichtFeld Studio ($lf)."
+    while true; do
+        rm -rf "$out"; mkdir -p "$out"
+        info "LichtFeld : images de $res px de large max ($(hw_summary))."
+        run_diag "Entrainement LichtFeld" "$lf" -d "$S" -o "$out" -i "$GS_ITERS" \
+            --sh-degree "$GS_SH_DEGREE" --max-width "$res" --headless && break
+        case "$SAGA_FAIL" in ram|gpu) ;; *) return 1 ;; esac
+        next=$(shrink_width "$res")
+        [ "$next" = 0 ] && return 1
+        warn "Nouvel essai automatique avec des images de $next px."
+        res="$next"
+    done
+    # PLY final : splat_<iter>.ply de plus grande iteration (sinon le plus recent)
+    ply="$(find "$out" -name 'splat_*.ply' 2>/dev/null | sed -E 's#(.*splat_([0-9]+)\.ply)#\2 \1#' | sort -n | tail -n 1 | cut -d' ' -f2-)"
+    [ -n "$ply" ] || ply="$(find "$out" -name '*.ply' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n 1 | cut -d' ' -f2-)"
+    [ -n "$ply" ] && ply_is_3dgs "$ply" || { err "LichtFeld : aucun PLY Gaussian Splatting trouve dans $out."; return 1; }
+    if ! ply_matches_colmap "$ply" "$S/sparse/0"; then
+        err "Le PLY de LichtFeld n'est pas dans le repere des cameras COLMAP : SAGA decouperait a cote."
+        return 1
+    fi
+    local dest="$S/model/point_cloud/iteration_$GS_ITERS"
+    mkdir -p "$dest"
+    mv -f "$ply" "$dest/scene_point_cloud.ply"
+    write_cfg_args "$S/model" "$S" "$dest/scene_point_cloud.ply"
+    ok "Modele LichtFeld range au format SAGA ($dest)."
+}
+
 step_train() {
     local S="$1" it
     it="$(scene_iter "$S")"
@@ -1326,6 +1448,11 @@ step_train() {
     res=$(fit_width "$(count_images "$S/images")" "$(image_ratio "$w" "$h")" 50)
     [ "$res" -gt "$GS_MAX_IMAGE_SIZE" ] && res="$GS_MAX_IMAGE_SIZE"
     [ "$res" -gt "$w" ] && res="$w"
+    if use_lichtfeld "$mask_dir"; then
+        train_lichtfeld "$S" "$res" && return 0
+        warn "LichtFeld n'a pas abouti : entrainement avec SAGA a la place."
+    fi
+    info "Moteur d'entrainement : SAGA (train_scene.py)."
     ( export GA_MASK_DIR="$mask_dir"
       saga_retry "Entrainement 3DGS" "$res" "$w" train_scene.py -s "$S" -m "$S/model" \
         --sh_degree "$GS_SH_DEGREE" --iterations "$GS_ITERS" --save_iterations "$GS_ITERS" --quiet ) \
@@ -1467,18 +1594,24 @@ PY
 SAGA_FAIL=""   # cause du dernier echec de saga_run : ram | gpu | autre
 
 saga_run() {
-    # saga_run <etiquette> <script.py> [args...] : lance un script SAGA, garde sa sortie,
+    # saga_run <etiquette> <script.py> [args...] : lance un script SAGA (voir run_diag)
+    local label="$1"; shift
+    run_diag "$label" saga_py "$@"
+}
+
+run_diag() {
+    # run_diag <etiquette> <commande> [args...] : lance la commande, garde sa sortie,
     # et en cas d'echec explique la cause (RAM, memoire GPU) au lieu d'un simple "echoue"
     local label="$1"; shift
     local out="$STATE_DIR/last_saga_run.txt" rc
     SAGA_FAIL=""
-    saga_py "$@" 2>&1 | tee "$out"
+    "$@" 2>&1 | tee "$out"
     rc=${PIPESTATUS[0]}
     [ "$rc" = 0 ] && return 0
-    if grep -qiE "CUDA out of memory|OutOfMemoryError|CUBLAS_STATUS_ALLOC_FAILED" "$out"; then
+    if grep -qiE "CUDA out of memory|OutOfMemoryError|CUBLAS_STATUS_ALLOC_FAILED|cudaErrorMemoryAllocation|CUDA error: out of memory" "$out"; then
         SAGA_FAIL=gpu
         err "$label : memoire de la CARTE GRAPHIQUE insuffisante (code $rc)."
-    elif [ "$rc" = 137 ] || [ "$rc" = 9 ] || grep -qE "^Killed|MemoryError" "$out"; then
+    elif [ "$rc" = 137 ] || [ "$rc" = 9 ] || grep -qE "^Killed|MemoryError|std::bad_alloc" "$out"; then
         SAGA_FAIL=ram
         err "$label : RAM du PC saturee, Linux a arrete le programme (code $rc)."
         command -v free &>/dev/null && free -h | sed 's/^/     /'
@@ -2190,6 +2323,7 @@ cmd_hw() {
     echo "VRAM_MB=$HW_VRAM_MB"
     echo "RAM_MB=$HW_RAM_MB"
     echo "AUTO_MAX_IMAGE_SIZE=$(auto_image_size)"
+    echo "LICHTFELD=$(find_lichtfeld 2>/dev/null)"
 }
 
 cmd_install_agy() {

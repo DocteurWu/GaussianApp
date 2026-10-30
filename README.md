@@ -160,6 +160,30 @@ Le PLY de la scène entière est aussi exporté dans `output_ply/FINAL_<projet>.
 
 SAGA a besoin de photos et de caméras. Avec un PLY seul, l'app **rend elle-même ~300 vues virtuelles** de la scène : la moitié en orbite autour (4 hauteurs, 2 distances), l'autre moitié depuis l'intérieur. Les vues vides sont écartées. SAM et SAGA travaillent ensuite sur ces vues. L'avantage : les vues sont **forcément dans le même repère que le PLY**.
 
+### LichtFeld Studio comme moteur d'entraînement
+
+L'**entraînement 3DGS** (fabriquer le PLY à partir des photos et des caméras) peut se faire de deux façons :
+- **SAGA** : le dépôt SAGA contient sa propre copie du 3DGS d'origine (`train_scene.py`) ;
+- **LichtFeld Studio** : plus rapide, s'il est installé sur le PC.
+
+La **découpe**, elle, est toujours faite par SAGA : masques SAM, `get_scale`, features, fenêtre de découpe.
+
+Réglage **Moteur d'entraînement 3DGS** :
+
+| Valeur | Effet |
+|---|---|
+| `auto` (défaut) | LichtFeld s'il est trouvé sur le PC, sinon SAGA |
+| `lichtfeld` | LichtFeld obligatoirement (SAGA si introuvable) |
+| `saga` | toujours SAGA |
+
+Comment l'app utilise LichtFeld :
+- **Recherche** : `LichtFeld-Studio` dans le PATH, sinon dans le dossier personnel ou `/opt`. Un autre emplacement s'indique avec `GS_LICHTFELD=/chemin/LichtFeld-Studio bash gaussian_app.sh`.
+- **Lancement** : `LichtFeld-Studio -d <projet> -o <projet>/lichtfeld -i <itérations> --sh-degree <SH> --max-width <px> --headless`. La largeur est adaptée au matériel et réduite toute seule si la mémoire déborde.
+- **Rangement** : le PLY produit (`splat_<itérations>.ply`) est rangé au format SAGA, avec son `cfg_args`.
+- **Vérification du repère** : l'app vérifie que le PLY est bien autour des caméras COLMAP. Sinon, la découpe tomberait à côté.
+- **Repli** : si LichtFeld échoue, ou si son PLY n'est pas dans le bon repère, l'app **repasse automatiquement** sur l'entraînement SAGA.
+- **Avec YOLO activé**, l'entraînement se fait avec SAGA, qui sait ignorer les zones masquées.
+
 ### PLY entraîné ailleurs (LichtFeld Studio, 360 Splat Pro, Postshot…)
 
 SAGA attend un modèle produit par son propre code : un fichier `cfg_args` et le PLY rangé dans `point_cloud/iteration_N/scene_point_cloud.ply`. Ces logiciels ne produisent pas ce format. **L'app génère `cfg_args` elle-même** (avec le degré SH lu dans le PLY) et range le PLY au bon endroit.
@@ -223,6 +247,7 @@ Puis elle choisit elle-même :
 | `GS_FPS` | 2 | images extraites par seconde de vidéo (1 à 3 conseillé) |
 | `GS_MAX_FRAMES` | 250 | nombre max d'images, réparties sur toute la vidéo |
 | `GS_MAX_IMAGE_SIZE` | auto | résolution max (COLMAP + entraînement) : 1024 à 2400 selon la carte |
+| `GS_TRAINER` | auto | moteur d'entraînement 3DGS : `auto` (LichtFeld s'il est installé), `lichtfeld` ou `saga` (§7) |
 | `GS_ITERS` | 30000 | itérations 3DGS (7000 = essai rapide) |
 | `GS_SH_DEGREE` | 1 | reflets : 1 = léger (Quest 3), 3 = complets |
 | `GS_SAM_DOWNSAMPLE` | auto | réduction des images pour SAM (1, 2, 4 ou 8) selon la carte ; réessaie seule plus fort si besoin |

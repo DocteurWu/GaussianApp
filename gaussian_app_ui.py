@@ -46,6 +46,8 @@ SETTINGS = [
      "help": "Plafond et sol vus de face. Inutile si vous faites des tours à plusieurs hauteurs."},
     {"key": "GS_MAX_IMAGE_SIZE", "group": "Reconstruction", "label": "Résolution maximale (pixels)", "type": "choice", "choices": ["auto", 1024, 1280, 1600, 2000, 2400, 3200], "default": "auto",
      "help": "Pour COLMAP et l'entraînement. auto = selon la carte graphique et la RAM (1600 sur une RTX 2080) ; réduit tout seul si la mémoire déborde."},
+    {"key": "GS_TRAINER", "group": "Reconstruction", "label": "Moteur d'entraînement 3DGS", "type": "choice", "choices": ["auto", "lichtfeld", "saga"], "default": "auto",
+     "help": "auto = LichtFeld Studio s'il est installé sur le PC, sinon SAGA. Si LichtFeld échoue ou si son PLY n'est pas dans le repère des caméras, l'app repasse seule sur SAGA. Avec YOLO activé : SAGA."},
     {"key": "GS_ITERS", "group": "Reconstruction", "label": "Itérations d'entraînement 3DGS", "type": "int", "min": 1000, "max": 60000, "default": 30000,
      "help": "7000 = essai rapide (~5 min), 30000 = qualité (~30-40 min sur RTX 2080)."},
     {"key": "GS_SH_DEGREE", "group": "Reconstruction", "label": "Reflets (degré SH)", "type": "choice", "choices": [0, 1, 2, 3], "default": 1,
@@ -858,7 +860,8 @@ async function loadSettings() {
   const hw = j.hw || {};
   $('hwNote').textContent = hw.VRAM_MB
     ? `🖥️ Détecté : ${hw.GPU_NAME || 'carte graphique'} (${(hw.VRAM_MB / 1024).toFixed(0)} Go), RAM libre ${(hw.RAM_MB / 1024).toFixed(0)} Go. `
-      + `« auto » s'adapte à ce matériel (résolution max ≈ ${hw.AUTO_MAX_IMAGE_SIZE} px) et réduit tout seul les images si la mémoire déborde.`
+      + `« auto » s'adapte à ce matériel (résolution max ≈ ${hw.AUTO_MAX_IMAGE_SIZE} px) et réduit tout seul les images si la mémoire déborde. `
+      + (hw.LICHTFELD ? `LichtFeld Studio trouvé : ${hw.LICHTFELD}.` : 'LichtFeld Studio non trouvé : entraînement avec SAGA.')
     : '« auto » s\'adapte à la carte graphique et à la RAM, et réduit tout seul les images si la mémoire déborde.';
   let html = '', group = '';
   for (const s of SPEC) {
