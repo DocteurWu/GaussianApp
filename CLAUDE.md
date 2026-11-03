@@ -15,6 +15,11 @@ Les utilisateurs parlent français et veulent des explications simples.
 - SAGA est cloné dans `saga/` (branche v2). L'app le **corrige automatiquement** à chaque lancement : fonctions `patch_saga_*` dans `gaussian_app.sh`. Ne pas modifier `saga/` à la main : corriger plutôt le patch dans `gaussian_app.sh`.
 - YOLO doit rester **optionnel** (désactivé par défaut).
 
+## Assistants portables
+- Claude Code et Antigravity CLI : programmes dans `tools/linux/`, lancés par `bash gaussian_app.sh claude` / `agy`, ou par les boutons de l'interface.
+- La clé est en **FAT32** : pas d'exécution directe, pas de liens symboliques, fichiers de 4 Go maximum. Toujours lancer avec `bash ...`.
+- Les programmes sont copiés dans `~/.cache/gaussian_app/bin` au lancement. Les connexions aux comptes restent sur le PC. Ne jamais les copier sur la clé.
+
 ## Où regarder en cas de bug
 - `gaussian_app.log` (à la racine, à côté de `workspace/`) : journal complet de chaque commande.
 - `.gaussian_app/last_saga_run.txt` : sortie complète du dernier programme SAGA ou LichtFeld lancé.

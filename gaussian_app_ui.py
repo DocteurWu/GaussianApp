@@ -91,7 +91,7 @@ def read_settings():
 def hardware():
     # materiel detecte par gaussian_app.sh (valeurs utilisees par les reglages "auto")
     try:
-        out = subprocess.run(["bash", APP, "hw"], capture_output=True, text=True, timeout=20).stdout
+        out = subprocess.run([os.environ.get("GA_BASH", "bash"), APP, "hw"], capture_output=True, text=True, timeout=20).stdout
     except (OSError, subprocess.SubprocessError):
         return {}
     return dict(l.split("=", 1) for l in out.splitlines() if "=" in l)
@@ -516,11 +516,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def action(self, data):
         act, p = data.get("action", ""), data.get("project", "")
-        if act not in ("install", "build", "claude") and (not NAME_RE.match(p) or not os.path.isdir(os.path.join(WORK, p))):
+        if act in ("claude", "agy"):
+            # Assistant : fenetre de terminal a part, utilisable meme pendant une tache
+            try:
+                r = subprocess.run([os.environ.get("GA_BASH", "bash"), APP, "open-terminal", act], capture_output=True, text=True, timeout=30)
+            except (OSError, subprocess.SubprocessError) as e:
+                return self.send_json({"error": str(e)}, 500)
+            if r.returncode != 0:
+                msg = re.sub(r"\x1b\[[0-9;]*m", "", (r.stdout + r.stderr).strip())
+                return self.send_json({"error": msg or "Impossible d'ouvrir un terminal."}, 500)
+            return self.send_json({"ok": True})
+        if act not in ("install", "build", "assistants") and (not NAME_RE.match(p) or not os.path.isdir(os.path.join(WORK, p))):
             return self.send_json({"error": "projet inconnu"}, 400)
         table = {
             "install": ("Installation", ["install"]),
-            "claude": ("Installation de Claude Code", ["install-claude"]),
+            "assistants": ("Claude et Antigravity sur la cle", ["update-assistants"]),
             "build": ("Videos de input_video/", ["build"]),
             "run": (f"Creer le PLY - {p}", ["run", p]),
             "saga": (f"Preparer SAGA - {p}", ["run", p, "--saga"]),
@@ -776,7 +786,9 @@ async function refresh() {
     `<span class="pill ${i.tools ? 'ok' : 'no'}">${i.tools ? '✓' : '○'} FFmpeg · COLMAP</span>` +
     `<span class="pill ${i.saga ? 'ok' : 'no'}">${i.saga ? '✓' : '○'} SAGA</span>` +
     `<button onclick="act('install')" ${busy ? 'disabled' : ''} title="Télécharge et installe tout ce qui manque, sans droits admin">${i.tools && i.saga ? 'Vérifier l\'installation' : '⬇ Tout installer'}</button>` +
-    `<button onclick="act('claude')" ${busy ? 'disabled' : ''} title="Assistant Claude Code dans le terminal, sans droits admin : il peut lire les logs et corriger les erreurs">🤖 Installer Claude</button>`);
+    `<button onclick="api('/api/action', {action: 'claude'})" title="Ouvre Claude Code dans une fenêtre de terminal, depuis la clé et sans droits admin : il peut lire les logs et corriger les erreurs">🤖 Claude</button>` +
+    `<button onclick="api('/api/action', {action: 'agy'})" title="Ouvre Antigravity CLI dans une fenêtre de terminal, depuis la clé et sans droits admin">🛰️ Antigravity</button>` +
+    `<button onclick="act('assistants')" ${busy ? 'disabled' : ''} title="Télécharge sur la clé la dernière version de Claude et d'Antigravity">⬇ MàJ assistants</button>`);
   renderProjects();
   $('outdir').textContent = S.base + '/output_ply';
   setHTML('outputs', S.outputs.length ? S.outputs.map(f =>

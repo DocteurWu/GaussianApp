@@ -591,6 +591,176 @@ print("[OK] SAGA : entrainement 3DGS avec masques ignores (Mask Mode: Ignore).")
 PY
 }
 
+patch_saga_gui_fixes() {
+    # saga_gui.py :
+    # - torch.eig n'existe plus dans PyTorch 2 (la fenetre plantait a l'ouverture).
+    #   Matrice de covariance symetrique -> torch.linalg.eigh, valeurs propres reelles.
+    # - "save as" refuse (garde-fou) : le message utilisait e sans "except ... as e" -> fenetre fermee.
+    local gui="$SAGA_DIR/saga_gui.py"
+    [ -f "$gui" ] || return 0
+    python3 - "$gui" <<'PY'
+import re, sys
+p = sys.argv[1]
+src = open(p, encoding="utf-8", newline="").read()
+orig = src
+pat = (r"^( *)eigenvalues, eigenvectors = torch\.eig\(covariance_matrix, eigenvectors=True\)\r?\n"
+       r" *eigenvalues = torch\.norm\(eigenvalues, dim=1\)(\r?\n)")
+m = re.search(pat, src, re.M)
+if m:
+    ind, nl = m.group(1), m.group(2)
+    src = src[:m.start()] + (f"{ind}eigenvalues, eigenvectors = torch.linalg.eigh(covariance_matrix)  # GAUSSIAN_APP_EIG{nl}"
+                             f"{ind}eigenvalues = eigenvalues.abs(){nl}") + src[m.end():]
+elif "torch.eig(" in src:
+    print("[WARN] saga_gui.py inattendu : torch.eig non remplace.")
+src = re.sub(r"^( *)except:(\r?\n\1    with dpg\.window\(label=\"Tips\"\):\r?\n\1        dpg\.add_text\(str\(e\))",
+             r"\1except Exception as e:\2", src, flags=re.M)
+# sh_degree fixe a 3 : un PLY sans couleurs detaillees (sh_degree 0) plantait au chargement
+m = re.search(r"^( *)gs_model = GaussianModel\(opt\.sh_degree\)(\r?\n)", src, re.M)
+if m and "GAUSSIAN_APP_SH" not in src:
+    ind, nl = m.group(1), m.group(2)
+    src = src[:m.start()] + nl.join([
+        f"{ind}# GAUSSIAN_APP_SH : degre SH lu dans l'en-tete du PLY de la scene (nombre de f_rest_*)",
+        f"{ind}_ga_nrest = 0",
+        f"{ind}with open(opt.SCENE_PCD_PATH, 'rb') as _f:",
+        f"{ind}    for _l in _f:",
+        f"{ind}        if _l.startswith(b'end_header'):",
+        f"{ind}            break",
+        f"{ind}        _ga_nrest += _l.startswith(b'property') and _l.split()[-1].startswith(b'f_rest_')",
+        f"{ind}opt.sh_degree = int(round(((_ga_nrest + 3) / 3) ** 0.5)) - 1",
+        f"{ind}print(f'sh_degree = {{opt.sh_degree}} (lu dans le PLY)')",
+        "",
+    ]) + src[m.start():]
+# Clavier : fleches = tourner, ZQSD (et WASD) = se deplacer, R/F = monter/descendre
+# (une ancienne version des touches est remplacee : marqueur KEYS2)
+if "GAUSSIAN_APP_KEYS" in src and "GAUSSIAN_APP_KEYS2" not in src:
+    src = re.sub(r"^ *# GAUSSIAN_APP_KEYS .*?dpg\.add_key_down_handler\(callback=_ga_key\)\r?\n", "", src, flags=re.M | re.S)
+m = re.search(r"^( *)dpg\.add_mouse_click_handler\(callback=change_pos\)(\r?\n)", src, re.M)
+if m and "GAUSSIAN_APP_KEYS2" not in src:
+    ind, nl = m.group(1), m.group(2)
+    src = src[:m.end()] + nl.join([
+        f"{ind}# GAUSSIAN_APP_KEYS GAUSSIAN_APP_KEYS2 : deplacement au clavier (touche maintenue = mouvement continu)",
+        f"{ind}def _ga_key(sender, app_data):",
+        f"{ind}    if dpg.is_item_active('save_name'):",
+        f"{ind}        return",
+        f"{ind}    k = app_data[0] if isinstance(app_data, (list, tuple)) else app_data",
+        f"{ind}    c = self.camera",
+        f"{ind}    p = 50 * max(c.radius, 0.2)",
+        f"{ind}    moves = {{dpg.mvKey_Left: lambda: c.orbit(-400, 0), dpg.mvKey_Right: lambda: c.orbit(400, 0),",
+        f"{ind}             dpg.mvKey_Up: lambda: c.orbit(0, -400), dpg.mvKey_Down: lambda: c.orbit(0, 400),",
+        f"{ind}             dpg.mvKey_Z: lambda: c.scale(0.4) if c.radius > 0.1 else None,",
+        f"{ind}             dpg.mvKey_W: lambda: c.scale(0.4) if c.radius > 0.1 else None,",
+        f"{ind}             dpg.mvKey_S: lambda: c.scale(-0.4),",
+        f"{ind}             dpg.mvKey_Q: lambda: c.pan(p, 0), dpg.mvKey_A: lambda: c.pan(p, 0),",
+        f"{ind}             dpg.mvKey_D: lambda: c.pan(-p, 0),",
+        f"{ind}             dpg.mvKey_R: lambda: c.pan(0, -p), dpg.mvKey_F: lambda: c.pan(0, p)}}",
+        f"{ind}    if k in moves:",
+        f"{ind}        moves[k]()",
+        f"{ind}        self.update_camera = True",
+        f"{ind}dpg.add_key_down_handler(callback=_ga_key)",
+        "",
+    ]) + src[m.end():]
+# Bouton "nettoyer" : apres segment3d, ne garder que le plus gros bloc de gaussiennes connectees
+m = re.search(r"^( *)dpg\.add_button\(label=\"segment3d\"[^\r\n]*(\r?\n)", src, re.M)
+s = re.search(r"^( *)if self\.save_flag:\r?\n", src, re.M)
+if m and s and "GAUSSIAN_APP_CLEAN" not in src:
+    ind, nl = s.group(1), m.group(2)
+    clean = nl.join([
+        f"{ind}# GAUSSIAN_APP_CLEAN : garder seulement le bloc principal (enleve les morceaux separes)",
+        f"{ind}if getattr(self, '_ga_clean', False):",
+        f"{ind}    self._ga_clean = False",
+        f"{ind}    if self.engine['scene'].segment_times == 0:",
+        f"{ind}        dpg.set_value('pos_item', 'nettoyer : cliquez d abord segment3d')",
+        f"{ind}    else:",
+        f"{ind}        from scipy.sparse import coo_matrix as _coo",
+        f"{ind}        from scipy.sparse.csgraph import connected_components as _cc",
+        f"{ind}        _xyz = self.engine['scene'].get_xyz.detach().float().cpu().numpy()",
+        f"{ind}        _lo, _hi = np.percentile(_xyz, 2, axis=0), np.percentile(_xyz, 98, axis=0)",
+        f"{ind}        _diag = float(np.linalg.norm(_hi - _lo))  # _GA_VOX2 : ecart mini selon la densite (petit objet = points espaces)",
+        f"{ind}        _vox = max(_diag * dpg.get_value('_GaVox') / 100.0, 3.0 * _diag / np.sqrt(len(_xyz)), 1e-6)",
+        f"{ind}        _ijk = np.floor((_xyz - _xyz.min(0)) / _vox).astype(np.int64) + 1",
+        f"{ind}        _K = int(_ijk.max()) + 2",
+        f"{ind}        _uk, _inv = np.unique((_ijk[:, 0] * _K + _ijk[:, 1]) * _K + _ijk[:, 2], return_inverse=True)",
+        f"{ind}        _r, _c = [np.arange(len(_uk))], [np.arange(len(_uk))]",
+        f"{ind}        for _d in [(a, b, e) for a in (-1, 0, 1) for b in (-1, 0, 1) for e in (-1, 0, 1) if (a, b, e) > (0, 0, 0)]:",
+        f"{ind}            _nk = _uk + (_d[0] * _K + _d[1]) * _K + _d[2]",
+        f"{ind}            _pos = np.minimum(np.searchsorted(_uk, _nk), len(_uk) - 1)",
+        f"{ind}            _hit = _uk[_pos] == _nk",
+        f"{ind}            _r.append(np.nonzero(_hit)[0]); _c.append(_pos[_hit])",
+        f"{ind}        _r, _c = np.concatenate(_r), np.concatenate(_c)",
+        f"{ind}        _lab = _cc(_coo((np.ones(len(_r)), (_r, _c)), shape=(len(_uk), len(_uk))), directed=False)[1][_inv]",
+        f"{ind}        _keep = _lab == np.bincount(_lab).argmax()",
+        f"{ind}        _gone = int((~_keep).sum())",
+        f"{ind}        _keep = torch.from_numpy(_keep).cuda()",
+        f"{ind}        self.engine['scene'].segment(_keep)",
+        f"{ind}        self.engine['feature'].segment(_keep)",
+        f"{ind}        print(f'nettoyer : {{_gone}} gaussiennes isolees retirees, {{int(_keep.sum())}} gardees')",
+        f"{ind}        dpg.set_value('pos_item', f'Nettoye : {{_gone}} gaussiennes retirees ({{int(_keep.sum())}} gardees). roll_back = annuler')",
+        "",
+    ])
+    src = src[:s.start()] + clean + src[s.start():]
+    m = re.search(r"^( *)dpg\.add_button\(label=\"segment3d\"[^\r\n]*(\r?\n)", src, re.M)
+    bi = m.group(1)
+    src = src[:m.end()] + nl.join([
+        f"{bi}dpg.add_button(label=\"nettoyer (garder le bloc principal)\", callback=lambda: setattr(self, '_ga_clean', True))",
+        f"{bi}dpg.add_slider_float(label=\"ecart %\", default_value=2.0, min_value=0.3, max_value=10.0, tag=\"_GaVox\")",
+        "",
+    ]) + src[m.end():]
+m = re.search(r"^( *)_vox = max\(float\(np\.linalg\.norm\(_hi - _lo\)\) \* dpg\.get_value\('_GaVox'\) / 100\.0, 1e-6\)(\r?\n)", src, re.M)
+if m and "_GA_VOX2" not in src:
+    i, e = m.group(1), m.group(2)
+    src = src[:m.start()] + (f"{i}_diag = float(np.linalg.norm(_hi - _lo))  # _GA_VOX2 : ecart mini selon la densite (petit objet = points espaces){e}"
+                             f"{i}_vox = max(_diag * dpg.get_value('_GaVox') / 100.0, 3.0 * _diag / np.sqrt(len(_xyz)), 1e-6){e}") + src[m.end():]
+src = src.replace("molette = zoom, clic milieu = deplacer\\n",
+                  "molette = zoom, clic milieu = deplacer\\n"
+                  "Clavier : fleches = tourner, ZQSD = bouger,\\nR/F = monter/descendre\\n"
+                  "Autre partie de la scene prise ? apres\\nsegment3d : 'nettoyer' (ecart % plus petit\\n= coupe plus fin)\\n", 1) \
+    if "Clavier : fleches" not in src else src
+if src != orig:
+    open(p, "w", encoding="utf-8", newline="").write(src)
+    print("[OK] SAGA : fenetre de decoupe corrigee (PyTorch 2, save as, clavier, nettoyer).")
+PY
+}
+
+patch_saga_features() {
+    # train_contrastive_feature.py :
+    # - une vue sans pixel exploitable (vues virtuelles, interieur...) donne loss = nan, qui
+    #   detruit toutes les features pour la suite : on saute l'iteration.
+    # - la carte de features etait copiee pleine image x 10 echelles (~1 Go) avant de garder
+    #   1000 rayons : on garde les rayons d'abord (calcul identique, beaucoup moins de memoire).
+    local f="$SAGA_DIR/train_contrastive_feature.py"
+    [ -f "$f" ] || return 0
+    python3 - "$f" <<'PY'
+import re, sys
+p = sys.argv[1]
+src = open(p, encoding="utf-8", newline="").read()
+if "GAUSSIAN_APP_NANGUARD" in src:
+    sys.exit(0)
+nl = "\r\n" if "\r\n" in src else "\n"
+bw = re.search(r"^( *)loss\.backward\(\)\r?\n", src, re.M)
+fw = re.search(r"^( *)feature_with_scale = rendered_features\.unsqueeze\(0\)\.repeat\([^\r\n]*\r?\n"
+               r" *feature_with_scale = feature_with_scale \* gates[^\r\n]*\r?\n"
+               r"(?: *\r?\n)*"
+               r" *sampled_feature_with_scale = feature_with_scale\[:,:,sampled_ray\]\r?\n", src, re.M)
+if not bw or not fw:
+    sys.exit("[WARN] train_contrastive_feature.py inattendu : protection anti-nan non appliquee.")
+ind = bw.group(1)
+guard = nl.join([
+    f"{ind}if not torch.isfinite(loss):  # GAUSSIAN_APP_NANGUARD : vue inexploitable, on la saute",
+    f"{ind}    feature_gaussians.optimizer.zero_grad(set_to_none = True)",
+    f"{ind}    if iteration % 10 == 0:",
+    f"{ind}        progress_bar.update(10)",
+    f"{ind}    continue",
+    "",
+])
+src = src[:bw.start()] + guard + src[bw.start():]
+fw = re.search(fw.re.pattern, src, re.M)
+i2 = fw.group(1)
+src = src[:fw.start()] + f"{i2}sampled_feature_with_scale = rendered_features[:, sampled_ray].unsqueeze(0) * gates.unsqueeze(-1){nl}" + src[fw.end():]
+open(p, "w", encoding="utf-8", newline="").write(src)
+print("[OK] SAGA : features protegees contre nan et moins gourmandes en memoire.")
+PY
+}
+
 patch_saga_gui_guard() {
     # Garde-fous dans la fenetre SAGA :
     #  - apres segment3d, affiche le nombre de gaussiennes gardees (et previent si c'est trop large)
@@ -784,6 +954,8 @@ ensure_saga() {
     patch_saga_training
     patch_saga_knn
     patch_saga_lowmem
+    patch_saga_features
+    patch_saga_gui_fixes
     if ! saga_activate || [ -n "$(saga_missing)" ]; then
         info "Installation / reparation de l'environnement SAGA..."
         install_saga_env
@@ -2326,38 +2498,162 @@ cmd_hw() {
     echo "LICHTFELD=$(find_lichtfeld 2>/dev/null)"
 }
 
-cmd_install_claude() {
-    # Claude Code (assistant en ligne de commande) : installateur officiel, tout va dans
-    # ~/.local (aucun droit admin). Connexion ensuite avec son compte Claude au 1er lancement.
-    title "🤖 Installation de Claude Code (sans droits admin)"
-    local bin="$HOME/.local/bin" inst="$STATE_DIR/downloads/claude_install.sh"
-    if [ -x "$bin/claude" ] || command -v claude &>/dev/null; then
-        ok "Claude Code deja installe : $(command -v claude || echo "$bin/claude")"
-    else
-        mkdir -p "$STATE_DIR/downloads"
-        download "https://claude.ai/install.sh" "$inst" || die "Telechargement de l'installateur Claude Code impossible."
-        bash "$inst" || die "Installation de Claude Code echouee (voir ci-dessus)."
-        rm -f "$inst"
+# ------------------------------------------------------------------------------
+# Assistants portables : Claude Code et Antigravity CLI (agy).
+# Les programmes Linux sont gardes sur la cle (tools/linux/). Une cle FAT32/exFAT ne permet
+# pas de les executer directement : ils sont copies sur le PC (~/.cache) au lancement.
+# La connexion au compte reste sur le PC (~/.claude...), jamais sur la cle : une cle perdue
+# ne donne acces a aucun compte.
+# ------------------------------------------------------------------------------
+PORTABLE_DIR="$BASE_DIR/tools/linux"
+CLAUDE_RELEASES="https://downloads.claude.ai/claude-code-releases"
+AGY_RELEASES="https://antigravity-cli-auto-updater-974169037036.us-central1.run.app"
+
+portable_platform() {
+    local arch musl=""
+    case "$(uname -m)" in
+        x86_64|amd64)  arch=x64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) die "Processeur non pris en charge : $(uname -m)" ;;
+    esac
+    if [ -f /lib/libc.musl-x86_64.so.1 ] || [ -f /lib/libc.musl-aarch64.so.1 ] || ldd /bin/ls 2>/dev/null | grep -q musl; then
+        musl="-musl"
     fi
-    # ~/.local/bin dans le PATH des prochains terminaux
-    if ! grep -qs 'HOME/.local/bin' "$HOME/.bashrc"; then
-        echo 'export PATH="$HOME/.local/bin:$PATH"   # Claude Code (ajoute par Gaussian App)' >>"$HOME/.bashrc"
-        info "~/.local/bin ajoute au PATH dans ~/.bashrc."
-    fi
-    export PATH="$bin:$PATH"
-    command -v claude &>/dev/null && ok "Claude Code : $(claude --version 2>/dev/null)"
-    echo ""
-    echo "Pour parler a Claude sur ce PC, ouvrez un NOUVEAU terminal puis :"
-    echo "    cd \"$SCRIPT_DIR\""
-    echo "    claude"
-    echo "Au premier lancement, connectez-vous avec votre compte Claude (le navigateur s'ouvre)."
-    echo "Claude pourra lire $(basename "$MASTER_LOG") et .gaussian_app/last_saga_run.txt pour diagnostiquer."
+    echo "$arch$musl"
 }
 
-cmd_install_agy() {
-    title "🛰️  Installation d'Antigravity CLI (sans droits root)"
-    curl -fsSL https://antigravity.google/cli/install.sh | bash || return 1
-    echo 'Ajoutez a votre ~/.bashrc : export PATH="$HOME/.antigravity/bin:$PATH"'
+portable_path() { echo "$PORTABLE_DIR/$1-linux-$(portable_platform)"; }
+
+fetch_text() {
+    if command -v curl &>/dev/null; then curl -fsSL "$1"
+    elif command -v wget &>/dev/null; then wget -qO- "$1"
+    else python3 -c 'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1]).read().decode())' "$1"
+    fi
+}
+
+json_get() {
+    # echo '{...}' | json_get cle1 cle2 ...
+    python3 -c 'import json, sys
+d = json.load(sys.stdin)
+for k in sys.argv[1:]:
+    d = d[k]
+print(d)' "$@"
+}
+
+portable_fetch() {
+    # portable_fetch <claude|agy> : telecharge la derniere version sur la cle (somme de controle verifiee)
+    local tool="$1" plat dest version manifest url sum algo agy_plat
+    plat="$(portable_platform)"; dest="$(portable_path "$tool")"
+    case "$tool" in
+        claude)
+            version="$(fetch_text "$CLAUDE_RELEASES/latest")" || { err "Claude Code : serveur injoignable."; return 1; }
+            manifest="$(fetch_text "$CLAUDE_RELEASES/$version/manifest.json")" || return 1
+            sum="$(echo "$manifest" | json_get platforms "linux-$plat" checksum)" || return 1
+            url="$CLAUDE_RELEASES/$version/linux-$plat/claude"; algo=256 ;;
+        agy)
+            agy_plat="linux_${plat/x64/amd64}"; agy_plat="${agy_plat/-musl/_musl}"
+            manifest="$(fetch_text "$AGY_RELEASES/manifests/$agy_plat.json")" || { err "Antigravity : serveur injoignable."; return 1; }
+            version="$(echo "$manifest" | json_get version)" || return 1
+            url="$(echo "$manifest" | json_get url)" || return 1
+            sum="$(echo "$manifest" | json_get sha512)" || return 1
+            algo=512 ;;
+        *) return 1 ;;
+    esac
+    if [ -f "$dest" ] && [ "$(cat "$dest.version" 2>/dev/null)" = "$version" ]; then
+        ok "$tool $version deja sur la cle."
+        return 0
+    fi
+    mkdir -p "$PORTABLE_DIR" || return 1
+    rm -f "$dest.new" "$dest.new.part"
+    download "$url" "$dest.new" || { err "Telechargement de $tool impossible (place libre ? reseau ?)."; return 1; }
+    if ! echo "$sum  $dest.new" | "sha${algo}sum" -c --status; then
+        rm -f "$dest.new"
+        err "$tool : somme de controle incorrecte, fichier supprime."
+        return 1
+    fi
+    case "$url" in
+        *.tar.gz*)   # l'archive contient un membre "antigravity"
+            local x="$dest.extract"
+            rm -rf "$x"; mkdir -p "$x"
+            tar -xzf "$dest.new" -C "$x" || return 1
+            mv -f "$(find "$x" -type f -name antigravity | head -n 1)" "$dest" || return 1
+            rm -rf "$x" "$dest.new" ;;
+        *) mv -f "$dest.new" "$dest" || return 1 ;;
+    esac
+    echo "$version" >"$dest.version"
+    ok "$tool $version sur la cle : $dest ($(du -h "$dest" | cut -f1))"
+}
+
+portable_exe() {
+    # portable_exe <claude|agy> : copie le programme sur le PC et affiche le chemin executable
+    local tool="$1" src dir exe rc
+    src="$(portable_path "$tool")"
+    [ -f "$src" ] || return 1
+    for dir in "${XDG_CACHE_HOME:-$HOME/.cache}/gaussian_app/bin" "/tmp/gaussian_app_$(id -u)/bin"; do
+        mkdir -p "$dir" 2>/dev/null && chmod 700 "$dir" 2>/dev/null || continue
+        [ -O "$dir" ] || continue
+        exe="$dir/$tool"
+        if [ ! -x "$exe" ] || [ "$(wc -c <"$src")" != "$(wc -c <"$exe")" ] || [ "$src" -nt "$exe" ]; then
+            info "Copie de $tool sur ce PC ($dir)..." >&2
+            cp -f "$src" "$exe.tmp.$$" && chmod 755 "$exe.tmp.$$" && mv -f "$exe.tmp.$$" "$exe" || { rm -f "$exe.tmp.$$"; continue; }
+        fi
+        # 126/127 : dossier "noexec" ou programme incompatible, on essaie l'emplacement suivant
+        timeout 60 "$exe" --version >/dev/null 2>&1; rc=$?
+        if [ "$rc" != 126 ] && [ "$rc" != 127 ]; then
+            echo "$exe"
+            return 0
+        fi
+        warn "$exe ne peut pas s'executer ici (code $rc)." >&2
+    done
+    return 1
+}
+
+cmd_assistant() {
+    # cmd_assistant <claude|agy> [args...] : lance l'assistant depuis la cle, dans le dossier de l'app
+    local tool="$1" exe; shift
+    if [ ! -f "$(portable_path "$tool")" ]; then
+        info "$tool n'est pas encore sur la cle : telechargement..."
+        portable_fetch "$tool" || warn "Telechargement impossible : recherche d'une version deja installee sur ce PC."
+    fi
+    exe="$(portable_exe "$tool")"
+    [ -n "$exe" ] || exe="$(PATH="$HOME/.local/bin:$PATH" command -v "$tool")"
+    [ -n "$exe" ] || die "$tool ne peut pas etre lance sur ce PC (voir les messages ci-dessus)."
+    export PATH="$(dirname "$exe"):$HOME/.local/bin:$PATH"
+    # La mise a jour se fait sur la cle (commande update-assistants), pas sur le PC
+    [ "$tool" = claude ] && export DISABLE_AUTOUPDATER=1
+    cd "$SCRIPT_DIR" || die "Dossier de l'app introuvable."
+    exec "$exe" "$@"
+}
+
+cmd_update_assistants() {
+    title "⬇ Claude Code et Antigravity sur la cle"
+    local rc=0
+    portable_fetch claude || rc=1
+    portable_fetch agy || rc=1
+    return "$rc"
+}
+
+cmd_open_terminal() {
+    # cmd_open_terminal <claude|agy> : ouvre une fenetre de terminal qui reste ouverte en cas d'erreur
+    local tool="$1" f t pid
+    case "$tool" in claude|agy) ;; *) die "Assistant inconnu : $tool" ;; esac
+    [ -n "$DISPLAY$WAYLAND_DISPLAY" ] || die "Pas d'ecran sur cette session : lancez dans un terminal : bash $(printf %q "$SELF_PATH") $tool"
+    f="$STATE_DIR/open_$tool.sh"
+    {
+        printf 'bash %q %q\n' "$SELF_PATH" "$tool"
+        echo 'rc=$?; echo; echo "Termine (code $rc)."; read -r -p "Entree pour fermer cette fenetre..." _'
+    } >"$f"
+    for t in "gnome-terminal --" "konsole -e" "xfce4-terminal -x" "mate-terminal -x" "tilix -e" "terminator -x" \
+             "lxterminal -e" "kitty" "alacritty -e" "xterm -e" "x-terminal-emulator -e"; do
+        command -v "${t%% *}" &>/dev/null || continue
+        # shellcheck disable=SC2086
+        setsid $t bash "$f" </dev/null >/dev/null 2>&1 &
+        pid=$!
+        sleep 1.5
+        if kill -0 "$pid" 2>/dev/null; then ok "$tool ouvert dans une fenetre ($t)."; return 0; fi
+        if wait "$pid"; then ok "$tool ouvert dans une fenetre ($t)."; return 0; fi
+    done
+    die "Aucun terminal n'a pu s'ouvrir. Dans un terminal, lancez : bash $(printf %q "$SELF_PATH") $tool"
 }
 
 cmd_install_launcher() {
@@ -2401,8 +2697,9 @@ $APP_NAME - Gaussian Splatting + decoupe SAGA, tout-en-un
   clean <in.ply> [out.ply] [opacite=-2] [echelle=3]
   status                        Etat des outils et des projets
   install-launcher              Raccourci dans le menu des applications
-  install-agy                   Installe Antigravity CLI
-  install-claude                Installe Claude Code (assistant, sans droits admin)
+  claude                        Lance Claude Code depuis la cle (sans droits admin)
+  agy                           Lance Antigravity CLI depuis la cle (sans droits admin)
+  update-assistants             Telecharge sur la cle la derniere version des deux
 
 Reglages : GS_FPS=$GS_FPS GS_MAX_FRAMES=$GS_MAX_FRAMES GS_ITERS=$GS_ITERS GS_SH_DEGREE=$GS_SH_DEGREE
            GS_MAX_IMAGE_SIZE=$GS_MAX_IMAGE_SIZE GS_SAM_DOWNSAMPLE=$GS_SAM_DOWNSAMPLE GS_SAGA_ITERS=$GS_SAGA_ITERS GS_SAGA_RES=$GS_SAGA_RES
@@ -2423,7 +2720,8 @@ MENU_ITEMS=(
     gui      "Decouper un objet avec SAGA"
     build    "Traiter toutes les videos de input_video/"
     install  "Installer / reparer tout"
-    install-claude "Installer Claude Code (assistant)"
+    claude   "Parler a Claude (assistant)"
+    agy      "Parler a Antigravity (assistant)"
     status   "Etat des outils et projets"
     quit     "Quitter"
 )
@@ -2497,7 +2795,7 @@ cmd_menu() {
 main() {
     local cmd="${1:-ui}"
     [ $# -gt 0 ] && shift
-    case "$cmd" in ui|menu|help|-h|--help|hw) ;;
+    case "$cmd" in ui|menu|help|-h|--help|hw|claude|agy|antigravity|open-terminal|update-assistants|install-claude|install-agy) ;;
         *) [ "$GS_MAX_IMAGE_SIZE" = auto ] && GS_MAX_IMAGE_SIZE=$(auto_image_size) ;;
     esac
     case "$cmd" in
@@ -2516,8 +2814,12 @@ main() {
         build)            start_logging "build"; cmd_build "$@" ;;
         clean)            start_logging "clean"; cmd_clean "$@" ;;
         status)           cmd_status ;;
-        install-agy)      cmd_install_agy ;;
-        install-claude)   cmd_install_claude ;;
+        claude)           cmd_assistant claude "$@" ;;
+        agy|antigravity)  cmd_assistant agy "$@" ;;
+        open-terminal)    cmd_open_terminal "$@" ;;
+        update-assistants) cmd_update_assistants ;;
+        install-claude)   portable_fetch claude ;;
+        install-agy)      portable_fetch agy ;;
         install-launcher) cmd_install_launcher ;;
         *) err "Commande inconnue : $cmd"; cmd_help; exit 1 ;;
     esac

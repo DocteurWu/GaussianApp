@@ -305,6 +305,7 @@ GaussianApp/
 │   ├── model/                 modèle 3DGS + features SAGA + segmentation_res/
 │   └── sam_masks/ mask_scales/
 ├── output_ply/            résultats
+├── tools/linux/           Claude et Antigravity (téléchargés au premier lancement)
 ├── .gaussian_app/         réglages et état de l'installation
 └── gaussian_app.log       journal complet
 ```
@@ -326,19 +327,17 @@ GaussianApp/
 | Installation cassée | supprimer `.gaussian_app/saga_ok`, puis **⬇ Tout installer** |
 | Autre | envoyer `gaussian_app.log` à Claude, ou demander directement à Claude sur le PC (ci-dessous) |
 
-### Parler à Claude directement sur le PC Linux
+### Parler à Claude ou Antigravity directement sur le PC Linux
 
-Bouton **🤖 Installer Claude** dans l'interface, ou dans un terminal :
-
-```bash
-bash gaussian_app.sh install-claude
-```
-
-L'app lance l'installateur officiel de Claude Code. Il s'installe dans `~/.local/bin`, **sans droits admin**. Ensuite, dans un **nouveau** terminal :
+Boutons **🤖 Claude** et **🛰️ Antigravity** en haut de l'interface : une fenêtre de terminal s'ouvre, et reste ouverte pour lire les erreurs éventuelles. Ou dans un terminal :
 
 ```bash
-cd GaussianApp
-claude
+bash gaussian_app.sh claude
+```
+```bash
+bash gaussian_app.sh agy
 ```
 
-Au premier lancement, connectez-vous avec votre compte Claude (le navigateur s'ouvre). Claude lit le fichier `CLAUDE.md` du dossier, qui décrit l'app, les contraintes du PC et l'emplacement des logs. Il suffit alors de lui dire par exemple « get_scale a planté, regarde les logs ».
+**Aucune installation ni droit admin** : le programme est téléchargé au premier lancement dans `tools/linux/` (sur la clé USB si l'app y est), puis copié dans `~/.cache/gaussian_app/` pour s'exécuter, car une clé FAT32 ou exFAT ne peut pas lancer de programme. Bouton **⬇ MàJ assistants** pour les mettre à jour.
+
+Au premier lancement sur un PC, connectez-vous avec votre compte (le navigateur s'ouvre). La connexion reste sur le PC, pas sur la clé. Claude lit le fichier `CLAUDE.md` du dossier, qui décrit l'app, les contraintes du PC et l'emplacement des logs. Il suffit alors de lui dire par exemple « get_scale a planté, regarde les logs ».

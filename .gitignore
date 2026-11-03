@@ -12,3 +12,4 @@ input_video/*
 *.insv
 *.zip
 __pycache__/
+tools/
